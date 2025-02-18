@@ -1,0 +1,3 @@
+[submodule "cosmicodes"]
+	path = cosmicodes
+	url = https://github.com/AlecThomson/cosmicodes.git
