@@ -1,0 +1,6 @@
+numpy
+matplotlib
+astropy
+git+https://github.com/AlecThomson/rm-lite.git
+scipy
+git+https://github.com/jfrob27/pywavan.git
