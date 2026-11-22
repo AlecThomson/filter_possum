@@ -960,13 +960,31 @@ def _style(ax, grid_axis="y"):
 
 
 def _title(fig_or_ax, headline: str, sub: str = "", fig=True):
-    """Headline states the takeaway; subtitle states the setup."""
+    """Headline states the takeaway in plain words; subtitle states the setup."""
     if fig:
-        fig_or_ax.text(0.01, 0.99, headline, fontsize=13, weight="bold", color=INK, va="top", ha="left")
+        fig_or_ax.text(0.01, 0.985, headline, fontsize=13, weight="bold", color=INK, va="top", ha="left")
         if sub:
-            fig_or_ax.text(0.01, 0.94, sub, fontsize=9.5, color=INK2, va="top", ha="left")
+            fig_or_ax.text(0.01, 0.935, sub, fontsize=9.5, color=INK2, va="top", ha="left")
     else:
         fig_or_ax.set_title(headline, fontsize=10.5, color=INK, loc="left")
+
+
+def _howto(fig, text: str):
+    """'How to read' footnote along the bottom of the figure."""
+    fig.text(0.01, 0.015, "How to read: " + text, fontsize=9, color=INK, va="bottom", ha="left", wrap=True,
+             bbox=dict(fc="#f3f2ee", ec="none", boxstyle="round,pad=0.5"))  # fmt: skip
+
+
+def _las_deg(u_lam):
+    """Largest angular scale an interferometer sees for shortest baseline u [wavelengths]: ~1/u radians."""
+    return 1.0 / np.asarray(u_lam, float) / DEG
+
+
+def _las_axis(ax):
+    ax.set_xscale("log")
+    ax.set_xticks([0.2, 0.3, 0.5, 1, 2, 3, 5], ["0.2", "0.3", "0.5", "1", "2", "3", "5"])
+    ax.xaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
+    ax.set_xlabel("Largest angular scale the interferometer can see [deg]  (larger → shorter baselines)")
 
 
 def _int_maps(cfg: SimConfig) -> dict:
@@ -984,25 +1002,31 @@ def _int_maps(cfg: SimConfig) -> dict:
         "pi": res["pi"],
         "rm_true": crop(phi, cfg),
         "rm_large": apply_transfer(phi, cfg, 1.0 - t_in),  # what the INT's RM should follow
+        # weak-screen law: PI_int = 2 lambda0^2 |high-passed RM|
         "pi_pred": 2 * res["lam_sq_0"] * np.abs(apply_transfer(phi - cfg.rm_mean, cfg, t_in)),
     }
+
+
+NATIVE = "as observed (largest scale shrinks with frequency)"
+MATCHED = "matched (same largest scale at every frequency)"
 
 
 def fig_what_int_measures(path: Path) -> None:
     """Fig 1: an interferometer's RM is the large-scale RM; its PI is the small-scale RM's magnitude."""
     cfg = replace(array_config(SimConfig(**REALISTIC), "askap", "possum1"), cut_mode="fixed", rm_sigma=2.0)
+    las = cfg.lams.min() / cfg.int_bmin_m / DEG
     m = _int_maps(cfg)
     ext = [cfg.fov_deg / 2, -cfg.fov_deg / 2, -cfg.fov_deg / 2, cfg.fov_deg / 2]
-    fig, axs = plt.subplots(2, 2, figsize=(10, 9.6))
-    fig.subplots_adjust(left=0.06, right=0.9, top=0.86, bottom=0.05, wspace=0.08, hspace=0.22)
+    fig, axs = plt.subplots(2, 2, figsize=(10, 10.6))
+    fig.subplots_adjust(left=0.04, right=0.9, top=0.86, bottom=0.12, wspace=0.08, hspace=0.18)
     lim = np.percentile(np.abs(m["rm_large"] - cfg.rm_mean), 99)
     rm_kw = dict(cmap=DIVERGING, vmin=cfg.rm_mean - lim, vmax=cfg.rm_mean + lim)
     pi_kw = dict(cmap=SEQ_BLUE, vmin=0, vmax=np.percentile(m["pi_pred"], 99))
     panels = [
-        (m["rm_large"], "Expected: true RM, scales larger than the cut", rm_kw),
-        (m["rm"], "Interferometer peak RM", rm_kw),
-        (m["pi_pred"], "Expected: 2λ₀² × |true RM, scales smaller than the cut|", pi_kw),
-        (m["pi"], "Interferometer peak PI  (true PI = 1)", pi_kw),
+        (m["rm_large"], f"True RM, smoothed: structure smaller than {las:.1f}° removed", rm_kw),
+        (m["rm"], "RM measured by the interferometer", rm_kw),
+        (m["pi_pred"], f"Predicted: 2λ² × size of the RM structure smaller than {las:.1f}°", pi_kw),
+        (m["pi"], "Polarised intensity measured by the interferometer", pi_kw),
     ]
     for ax, (img, title, kw) in zip(axs.flat, panels, strict=True):
         ax.imshow(img, origin="lower", extent=ext, **kw)
@@ -1011,62 +1035,77 @@ def fig_what_int_measures(path: Path) -> None:
         ax.set_yticks([])
         for sp in ax.spines.values():
             sp.set_visible(False)
-    for row, lab in enumerate(("RM [rad m⁻²]", "PI / p₀")):
-        cax = fig.add_axes([0.915, axs[row, 1].get_position().y0, 0.015, axs[row, 1].get_position().height])
-        cb = fig.colorbar(axs[row, 1].images[0], cax=cax)
+    for row, lab in enumerate(("RM [rad m⁻²]", "polarised intensity\n(true value = 1 everywhere)")):
+        pos = axs[row, 1].get_position()
+        cb = fig.colorbar(axs[row, 1].images[0], cax=fig.add_axes([0.915, pos.y0, 0.015, pos.height]))
         cb.set_label(lab, color=INK, fontsize=9)
         cb.ax.tick_params(labelsize=8, colors=INK2)
         cb.outline.set_visible(False)
-    c_rm = np.corrcoef(m["rm"].ravel(), m["rm_large"].ravel())[0, 1]
-    c_pi = np.corrcoef(m["pi"].ravel(), m["pi_pred"].ravel())[0, 1]
-    axs[0, 1].text(0.02, 0.02, f"correlation with left: {c_rm:.2f}", transform=axs[0, 1].transAxes, fontsize=9,
-                   color=INK, bbox=dict(fc="white", ec="none", alpha=0.85))  # fmt: skip
-    axs[1, 1].text(0.02, 0.02, f"correlation with left: {c_pi:.2f}", transform=axs[1, 1].transAxes, fontsize=9,
-                   color=INK, bbox=dict(fc="white", ec="none", alpha=0.85))  # fmt: skip
-    _title(fig, "An interferometer's RM map shows large-scale RM; its PI map shows small-scale RM",
-           f"ASKAP-like (22 m shortest baseline, uv-matched: u ≥ {cfg.int_bmin_m / cfg.lams.min():.0f} λ ≈ "
-           f"{1 / (cfg.int_bmin_m / cfg.lams.min()) / DEG:.1f}°), POSSUM band 1, weak screen σ(δRM) = 2 rad m⁻². "
-           "5° field.")  # fmt: skip
+    for row, (a, b) in enumerate(((m["rm"], m["rm_large"]), (m["pi"], m["pi_pred"]))):
+        c = np.corrcoef(a.ravel(), b.ravel())[0, 1]
+        axs[row, 1].text(0.02, 0.02, f"matches the left panel: correlation {c:.2f}", transform=axs[row, 1].transAxes,
+                         fontsize=9, color=INK, bbox=dict(fc="white", ec="none", alpha=0.85))  # fmt: skip
+    headline = (
+        "The interferometer's RM map shows the smooth RM;\nits polarised-intensity map shows the fine RM structure"
+    )
+    _title(fig, headline,
+           f"Simulated 5° × 5° field: polarised intensity is 1 everywhere, only the RM varies (30 ± 2 rad m⁻²).\n"
+           f"ASKAP-like interferometer, 800–1088 MHz, seeing angular scales up to {las:.1f}° at every frequency."
+           )  # fmt: skip
+    _howto(
+        fig,
+        "compare each row left to right. Top: the interferometer's RM agrees with the smoothed true RM, apart from "
+        "scattered speckles.\nBottom: the interferometer does not see the true polarised intensity (1 everywhere). Its "
+        "polarised intensity is instead set by how\nmuch the RM varies on scales it can see, and matches that "
+        "prediction exactly. The speckles (top right) sit where this is near zero.",
+    )
     fig.savefig(path, dpi=130, facecolor="white")
     plt.close(fig)
 
 
 def fig_errors_at_pi_nulls(path: Path) -> None:
     """Fig 2: where the INT RM errors are: binned by the INT's own PI."""
-    fig, ax = plt.subplots(figsize=(8, 5))
-    fig.subplots_adjust(left=0.1, right=0.8, top=0.8, bottom=0.12)
+    fig, ax = plt.subplots(figsize=(9.5, 6))
+    fig.subplots_adjust(left=0.09, right=0.66, top=0.8, bottom=0.27)
     base = array_config(SimConfig(**REALISTIC), "askap", "possum1")
     nb = 10
-    centres = (np.arange(nb) + 0.5) * 100 / nb
-    for cfg, col, lab in ((base, C2, "physical uv cut"), (replace(base, cut_mode="fixed"), C1, "uv-matched")):
+    centres = np.arange(nb) + 1
+    for cfg, col, lab in ((base, C2, NATIVE), (replace(base, cut_mode="fixed"), C1, MATCHED)):
         m = _int_maps(cfg)
         err = np.abs(m["rm"] - m["rm_true"]).ravel()
         rank = np.argsort(np.argsort(m["pi"].ravel())) / err.size  # PI percentile of each pixel
         med = [np.median(err[(rank >= i / nb) & (rank < (i + 1) / nb)]) for i in range(nb)]
         ax.plot(centres, med, "-o", color=col, lw=2, ms=6, mec="white", mew=1.5)
-        ax.annotate(lab, (centres[-1], med[-1]), xytext=(8, 0), textcoords="offset points", va="center",
-                    color=INK, fontsize=10)  # fmt: skip
-    ax.set(xlabel="Interferometer PI percentile (0 = faintest pixels, 100 = brightest)",
-           ylabel="median |RM error| [rad m⁻²]", xlim=(0, 100), ylim=(0, None))  # fmt: skip
+        ax.annotate(lab.replace(" (", "\n("), (centres[-1], med[-1]), xytext=(10, 0), textcoords="offset points",
+                    va="center", color=INK, fontsize=9.5, annotation_clip=False)  # fmt: skip
+    ax.set_xticks(centres, ["faintest\n10%"] + [""] * (nb - 2) + ["brightest\n10%"])
+    ax.set(xlabel="Pixels sorted into tenths by the polarised intensity the interferometer measures",
+           ylabel="Typical RM error [rad m⁻²]", ylim=(0, None))  # fmt: skip
     _style(ax)
-    _title(fig, "The interferometer's RM errors sit where its PI is faint",
-           "ASKAP-like, POSSUM band 1, default sky (σ(δRM) = 10 rad m⁻²). Pixels binned in tenths by the\n"
-           "interferometer's own PI: a signal-to-noise mask removes most of the error.")  # fmt: skip
+    _title(
+        fig,
+        "The interferometer's RMs are only badly wrong where its polarised intensity is faint",
+        "Simulated 5° × 5° field, RM 30 ± 10 rad m⁻², ASKAP-like interferometer, 800–1088 MHz, no noise.",
+    )
+    _howto(fig, "each dot is the median RM error of one tenth of the pixels. The faintest tenth (left) has large RM "
+                "errors; beyond\nthe faintest ~20% the error is flat. So a normal signal-to-noise cut on polarised "
+                "intensity removes the worst RMs.\nKeeping the same largest angular scale at every frequency (blue) "
+                "lowers the error everywhere.")  # fmt: skip
     fig.savefig(path, dpi=130, facecolor="white")
     plt.close(fig)
 
 
 def _arrays_on_axis(ax, top: float = 0.97, step: float = 0.065):
-    """Each array's shortest baseline as a u_min range across its band, one row each, direct-labelled.
+    """Where each real array sits: its largest angular scale (lambda / shortest baseline) across its band.
 
-    Rows sit in axes-fraction y (works on linear and log axes) so overlapping ranges never collide.
+    One row each in axes-fraction y (works on linear and log axes), direct-labelled.
     """
     trans = matplotlib.transforms.blended_transform_factory(ax.transData, ax.transAxes)
-    names = {"possum1": "POSSUM-1", "uhf": "UHF", "lband": "L-band"}
+    names = {"possum1": "800–1088 MHz", "uhf": "UHF", "lband": "L-band"}
     for i, (arr, band) in enumerate((("askap", "possum1"), ("meerkat", "possum1"), ("meerkat", "uhf"),
                                      ("meerkat", "lband"))):  # fmt: skip
         c = array_config(SimConfig(), arr, band)
-        lo, hi = c.int_bmin_m / c.lams.max(), c.int_bmin_m / c.lams.min()
+        lo, hi = c.lams.min() / c.int_bmin_m / DEG, c.lams.max() / c.int_bmin_m / DEG
         y = top - i * step
         ax.plot([lo, hi], [y, y], color=INK2, lw=2, solid_capstyle="butt", transform=trans, clip_on=False)
         ax.annotate(f"{'ASKAP' if arr == 'askap' else 'MeerKAT'} {names[band]}", (hi, y), xycoords=trans,
@@ -1074,68 +1113,71 @@ def _arrays_on_axis(ax, top: float = 0.97, step: float = 0.065):
 
 
 def fig_inner_cut(outdir: Path, path: Path) -> None:
-    """Fig 3: generic interferometer: RM error and PI vs the inner cut."""
+    """Fig 3: generic interferometer: RM error and PI vs the largest angular scale it sees."""
     d = json.loads((outdir / "t3_generic_scan_int_umin_lam.json").read_text())
-    u = np.array(d["values"], float)
+    x = _las_deg(d["values"])
     runs = d["baseline"]
-    fig, axs = plt.subplots(1, 2, figsize=(12, 5))
-    fig.subplots_adjust(left=0.07, right=0.97, top=0.78, bottom=0.13, wspace=0.28)
-    a = axs[0]
-    for key, col, lab in (("rm_rms_err", C2, "all pixels"), ("rm_rms_err_bright_half", C1, "brighter half of PI")):
-        y = [r["int"][key] for r in runs]
-        a.plot(u, y, "-o", color=col, lw=2, ms=6, mec="white", mew=1.5)
-        a.annotate(lab, (u[-1], y[-1]), xytext=(8, 0), textcoords="offset points", va="center", color=INK,
-                   fontsize=9.5)  # fmt: skip
+    fig, axs = plt.subplots(1, 2, figsize=(13, 6.2))
+    fig.subplots_adjust(left=0.06, right=0.97, top=0.78, bottom=0.27, wspace=0.22)
+    b = axs[0]
+    y = np.array([r["int"]["pi_mean"] for r in runs])
+    b.plot(x, y, "-o", color=C1, lw=2, ms=6, mec="white", mew=1.5)
+    slope = (11 / 3 - 2) / 2  # rms of RM structure below scale θ grows as θ^((|β| - 2) / 2) for P(k) ~ k^β
+    ref = y[5] * (x / x[5]) ** slope
+    b.plot(x, ref, color=INK2, lw=1)
+    b.annotate("expected from the RM power spectrum", (x[7], ref[7]), xytext=(8, -4), textcoords="offset points",
+               ha="left", va="top", fontsize=8.5, color=INK2)  # fmt: skip
+    b.set(yscale="log", ylabel="Polarised intensity recovered (true = 1)", ylim=(0.03, 6))
+    b.set_yticks([0.05, 0.1, 0.2, 0.5, 1], ["0.05", "0.1", "0.2", "0.5", "1"])
+    b.yaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
+    _title(b, "Polarised intensity recovered: more with larger scales", fig=False)
+    a = axs[1]
+    for key, col, lab in (("rm_rms_err", C2, "all pixels"), ("rm_rms_err_bright_half", C1, "brighter half of pixels")):
+        yy = [r["int"][key] for r in runs]
+        a.plot(x, yy, "-o", color=col, lw=2, ms=6, mec="white", mew=1.5)
+        a.annotate(lab, (x[-1], yy[-1]), xytext=(-8, 0 if key == "rm_rms_err" else 12), textcoords="offset points",
+                   ha="right", va="center",
+                   color=INK, fontsize=9.5)  # fmt: skip
     sd = runs[0]["sd"]["rm_rms_err"]
     a.axhline(sd, color=INK2, lw=1)
-    a.annotate(f"64 m single dish ({sd:.1f})", (u[0], sd), xytext=(0, -12), textcoords="offset points",
+    a.annotate(f"64 m single dish ({sd:.1f})", (x[0], sd), xytext=(0, -12), textcoords="offset points", ha="right",
                fontsize=8.5, color=INK2)  # fmt: skip
-    a.set(xscale="log", xlabel=r"interferometer inner cut $u_{\rm min}$ [λ]", ylabel="rms RM error [rad m⁻²]",
-          ylim=(0, 12), xlim=(8, 900))  # fmt: skip
-    _arrays_on_axis(a)
-    _title(a, "RM error: smaller with a larger cut", fig=False)
-    _style(a)
-    b = axs[1]
-    y = np.array([r["int"]["pi_mean"] for r in runs])
-    b.plot(u, y, "-o", color=C1, lw=2, ms=6, mec="white", mew=1.5)
-    # analytic scaling: rms of the high-passed RM ~ u_min^((beta + 2) / 2) for P(k) ~ k^beta
-    slope = (-11 / 3 + 2) / 2
-    ref = y[5] * (u / u[5]) ** slope
-    b.plot(u, ref, color=INK2, lw=1)
-    b.annotate(
-        r"expected slope $-5/6$ (RM spectrum $\propto k^{-11/3}$)",
-        (u[1], ref[1]),
-        xytext=(10, 6),
-        textcoords="offset points",
-        ha="left",
-        va="bottom",
-        fontsize=8.5,
-        color=INK2,
+    a.set(ylabel="RM error, rms [rad m⁻²]", ylim=(0, 12))
+    _title(a, "RM error: also larger with larger scales", fig=False)
+    for ax in axs:
+        _las_axis(ax)
+        ax.set_xlim(0.04, 8)
+        _arrays_on_axis(ax)
+        _style(ax)
+    _title(fig, "Seeing larger angular scales recovers more polarised intensity, but gives worse RMs",
+           "Idealised interferometer that sees every angular scale up to a given size, the same at every frequency.\n"
+           "Simulated 5° × 5° field, RM 30 ± 10 rad m⁻², polarised intensity 1 everywhere, 800–1088 MHz, no noise."
+           )  # fmt: skip
+    _howto(
+        fig,
+        "moving right = the interferometer sees larger scales (it has shorter baselines). Left: it recovers more of "
+        "the true\npolarised intensity. Right: but its RMs get worse, because the larger-scale RM variations it now "
+        "sees rotate the\npolarisation angle by more than a radian across the band (until, far right, it sees almost "
+        "the whole field). Grey bars:\nwhere ASKAP and MeerKAT sit; their largest scale changes across their band. "
+        "Without noise, small scales look best for\nRM; with noise, the faint polarised intensity there will push "
+        "the other way.",
     )
-    b.set(xscale="log", yscale="log", xlabel=r"interferometer inner cut $u_{\rm min}$ [λ]",
-          ylabel="mean peak PI (true = 1)", ylim=(0.03, 6), xlim=(8, 900))  # fmt: skip
-    _arrays_on_axis(b)
-    _title(b, "Recovered PI: falls steadily with the cut", fig=False)
-    _style(b)
-    _title(fig, "A larger inner cut gives a cleaner RM map but much less polarised signal",
-           "Generic interferometer: sharp cut fixed in wavelengths, POSSUM band 1, default sky (σ(δRM) = 10 rad m⁻²),"
-           " noiseless.\nWith noise, the falling PI will set an optimum cut. Grey bars: each array's shortest baseline "
-           "across its band.")  # fmt: skip
     fig.savefig(path, dpi=130, facecolor="white")
     plt.close(fig)
 
 
 def fig_arrays(outdir: Path, path: Path) -> None:
-    """Fig 4: ASKAP vs MeerKAT by band: dumbbells, physical cut -> uv-matched."""
+    """Fig 4: ASKAP vs MeerKAT by band: dumbbells, as observed -> matched largest scale."""
     s = json.loads((outdir / "t3_summary.json").read_text())
-    rows = [("askap", "possum1", "ASKAP · POSSUM band 1"), ("meerkat", "possum1", "MeerKAT · POSSUM band 1"),
-            ("askap", "possum12", "ASKAP · POSSUM bands 1+2"), ("meerkat", "uhf", "MeerKAT · UHF"),
-            ("meerkat", "lband", "MeerKAT · L-band")]  # fmt: skip
-    fig, axs = plt.subplots(1, 2, figsize=(12, 4.6), sharey=True)
-    fig.subplots_adjust(left=0.2, right=0.97, top=0.76, bottom=0.13, wspace=0.12)
+    rows = [("askap", "possum1", "ASKAP, 800–1088 MHz"), ("meerkat", "possum1", "MeerKAT, 800–1088 MHz"),
+            ("askap", "possum12", "ASKAP, 800–1088 + 1296–1440 MHz"), ("meerkat", "uhf", "MeerKAT UHF, 544–1088 MHz"),
+            ("meerkat", "lband", "MeerKAT L-band, 856–1712 MHz")]  # fmt: skip
+    fig, axs = plt.subplots(1, 2, figsize=(13, 6.2), sharey=True)
+    fig.subplots_adjust(left=0.2, right=0.97, top=0.74, bottom=0.25, wspace=0.12)
     y = np.arange(len(rows))[::-1]
-    for ax, key, xlab, title in ((axs[0], "rm_rms_err", "rms RM error [rad m⁻²]", "RM error"),
-                                 (axs[1], "pi_mean", "mean peak PI (true = 1)", "Recovered PI")):  # fmt: skip
+    for ax, key, xlab, title in ((axs[0], "rm_rms_err", "RM error, rms [rad m⁻²]", "RM error (lower is better)"),
+                                 (axs[1], "pi_mean", "Polarised intensity recovered (true = 1)",
+                                  "Polarised intensity recovered (higher is better)")):  # fmt: skip
         for yi, (arr, band, _) in zip(y, rows, strict=True):
             a = s[f"t3_{arr}_{band}"]["int"][key]
             b = s[f"t3_{arr}_{band}_fixedcuts"]["int"][key]
@@ -1148,50 +1190,71 @@ def fig_arrays(outdir: Path, path: Path) -> None:
         ax.spines["left"].set_visible(False)
         ax.tick_params(axis="y", length=0)
     axs[0].set_yticks(y, [r[2] for r in rows], fontsize=10, color=INK)
+    axs[0].set_ylim(-0.6, len(rows) - 0.3)
     key = [
         matplotlib.lines.Line2D([], [], ls="", marker="o", ms=8, mfc=c, mec="white", label=lab)
-        for c, lab in ((C2, "physical uv cut (moves across the band)"), (C1, "uv-matched across the band"))
+        for c, lab in ((C2, NATIVE), (C1, MATCHED))
     ]
-    fig.legend(handles=key, loc="upper right", bbox_to_anchor=(0.97, 0.99), frameon=False, fontsize=9.5)  # fmt: skip
-    axs[0].set_ylim(-0.6, len(rows) - 0.3)
-    _title(fig, "The band matters more than the array; matching uv coverage across the band always helps",
-           "Interferometer only, default sky (σ(δRM) = 10 rad m⁻²), noiseless. ASKAP: 22 m shortest baseline, 12 m "
-           "dishes; MeerKAT: 29 m, 13.5 m.\nLower frequencies give more PI (angle gradients ∝ λ²). Wide bands "
-           "gain most from uv matching (L-band 8.5 → 2.4).")  # fmt: skip
+    fig.legend(handles=key, loc="upper left", bbox_to_anchor=(0.2, 0.86), frameon=False, fontsize=9.5, ncol=2)
+    _title(fig, "The frequency band matters more than ASKAP vs MeerKAT",
+           "Interferometer only. Simulated 5° × 5° field, RM 30 ± 10 rad m⁻², polarised intensity 1 everywhere, "
+           "no noise.\nASKAP: 36 × 12 m dishes, shortest baseline 22 m.  MeerKAT: 64 × 13.5 m dishes, shortest 29 m."
+           )  # fmt: skip
+    _howto(fig, "each row is one telescope and band. Orange: as observed. Blue: every frequency restricted to the "
+                "same largest angular scale.\nThe top two rows (same band, different array) are close; changing the "
+                "band moves the results much more. Lower frequencies\n(UHF) recover more polarised intensity, because "
+                "Faraday rotation grows as λ². Matching the scales costs a little polarised\nintensity but cuts the RM "
+                "error 1.5–3.5×, most for the widest band (L-band, 8.5 → 2.4 rad m⁻²).")  # fmt: skip
     fig.savefig(path, dpi=130, facecolor="white")
     plt.close(fig)
 
 
 def fig_gradient(outdir: Path, path: Path) -> None:
-    """Fig 5: a strong RM gradient survives an interferometer only below its fringe scale."""
+    """Fig 5: a strong RM gradient survives an interferometer only if it sees scales larger than its stripes."""
     d = json.loads((outdir / "t3_generic_grad50_scan_int_umin_lam.json").read_text())
-    u = np.array(d["values"], float)
+    x = _las_deg(d["values"])
     runs = d["baseline"]
     cfg = replace(SimConfig(**REALISTIC), rm_sigma=0.0, rm_grad_deg=50.0)
-    fig, ax = plt.subplots(figsize=(8, 5))
-    fig.subplots_adjust(left=0.1, right=0.95, top=0.78, bottom=0.12)
-    g = np.geomspace(u.min(), u.max(), 300)
-    pred = [predicted_gradient_int_pi(replace(cfg, int_umin_lam=v), 50.0) for v in g]
-    ax.plot(g, pred, color=INK2, lw=1)
-    ax.annotate("pure-gradient prediction:\nfraction of channels whose\nfringe |∇RM|λ²/π clears the cut",
-                (g[215], pred[215]), xytext=(60, 70), textcoords="offset points", fontsize=8.5, color=INK2,
+    # the gradient winds the angle into Q/U stripes with period pi / (|grad RM| lambda^2) radians
+    period = np.pi / (50.0 / DEG * cfg.lams**2) / DEG
+    fig, ax = plt.subplots(figsize=(10, 6.4))
+    fig.subplots_adjust(left=0.08, right=0.96, top=0.77, bottom=0.26)
+    ax.axvspan(period.min(), period.max(), color="#f3f2ee", zorder=0)
+    ax.annotate(f"stripe spacing\n{period.min():.2f}–{period.max():.2f}°", (np.sqrt(period.min() * period.max()), 0.04),
+                ha="center", va="bottom", fontsize=8.5, color=INK2)  # fmt: skip
+    g = np.geomspace(1 / x.max() / DEG, 1 / x.min() / DEG, 300)  # u grid
+    pred = np.array([predicted_gradient_int_pi(replace(cfg, int_umin_lam=v), 50.0) for v in g])
+    ax.plot(_las_deg(g), pred, color=INK2, lw=1)
+    i = np.argmin(np.abs(pred - 0.5))
+    ax.annotate("prediction: fraction of frequency channels\nwhose stripe spacing fits within the largest scale",
+                (_las_deg(g[i]), pred[i]), xytext=(0.02, 0.55), textcoords="axes fraction", fontsize=8.5, color=INK2,
                 arrowprops=dict(arrowstyle="-", color=INK2, lw=0.6))  # fmt: skip
-    y = [r["int"]["pi_mean"] for r in runs]
-    ax.plot(u, y, "-o", color=C1, lw=2, ms=6, mec="white", mew=1.5)
-    ax.annotate("interferometer", (u[2], y[2]), xytext=(0, 8), textcoords="offset points", fontsize=9.5, color=INK)
+    yy = [r["int"]["pi_mean"] for r in runs]
+    ax.plot(x, yy, "-o", color=C1, lw=2, ms=6, mec="white", mew=1.5)
+    ax.annotate("interferometer", (x[0], yy[0]), xytext=(-6, 8), textcoords="offset points", ha="right", fontsize=9.5,
+                color=INK)  # fmt: skip
     sd = runs[0]["sd"]["pi_mean"]
     ax.axhline(sd, color=C2, lw=2)
-    ax.annotate(f"64 m single dish ({sd:.2f})", (u[0], sd), xytext=(0, 6), textcoords="offset points", fontsize=9.5,
+    ax.annotate(f"64 m single dish ({sd:.2f})", (x[0], sd), xytext=(0, 6), textcoords="offset points", ha="right",
+                fontsize=9.5,
                 color=INK)  # fmt: skip
-    ax.set(xscale="log", xlabel=r"interferometer inner cut $u_{\rm min}$ [λ]", ylabel="mean peak PI (true = 1)",
-           ylim=(0, 1.55), xlim=(8, 900))  # fmt: skip
+    ax.set(ylabel="Polarised intensity recovered (true = 1)", ylim=(0, 1.55))
     ax.set_yticks([0, 0.2, 0.4, 0.6, 0.8, 1.0])
+    _las_axis(ax)
+    ax.set_xlim(0.06, 8)
     _arrays_on_axis(ax)
     _style(ax)
-    _title(fig, "A strong RM gradient is kept by the interferometer, lost by the single dish",
-           "50 rad m⁻² deg⁻¹ gradient on the default sky, POSSUM band 1. Its Q/U fringes sit at 69–128 λ:\n"
-           "an inner cut below that keeps them; a 64 m dish beam-depolarises them. Above ~110 λ the screen's own\n"
-           "small-scale structure keeps some PI.")  # fmt: skip
+    _title(fig, "A strong RM gradient survives if the interferometer sees scales larger than its stripes",
+           "RM gradient of 50 rad m⁻² per degree across the simulated field (plus RM 30 ± 10 rad m⁻²), 800–1088 MHz.\n"
+           "The gradient twists the polarisation angle into stripes across the sky; their spacing shrinks with "
+           "frequency.")  # fmt: skip
+    _howto(
+        fig,
+        "moving right = the interferometer sees larger scales. Once its largest scale is bigger than the stripe "
+        "spacing (shaded),\nit keeps all the polarised intensity; when it is smaller, the stripes are filtered out. "
+        "ASKAP and MeerKAT sit right in that\ntransition. The 64 m dish (orange) loses most of it because its ~0.3° "
+        "beam averages over neighbouring stripes, which cancel.",
+    )
     fig.savefig(path, dpi=130, facecolor="white")
     plt.close(fig)
 

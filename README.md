@@ -77,6 +77,19 @@ linear colour scale, ±RMSF FWHM/2 by default (`--err-lim` to change).
 
 ### Test 3: what different interferometers tell us
 
+Plain-language key (the figures use these terms):
+
+* **Largest angular scale** an interferometer can see ≈ λ / (shortest baseline), in degrees. It is
+  the inverse of the "inner uv cut" u_min used in the code (u_min = 80 λ ↔ 0.7°). Larger scales are
+  invisible to it.
+* **As observed vs matched**: with a fixed shortest baseline the largest scale shrinks as frequency
+  rises, so each channel sees a different sky. "Matched" restricts every channel to the same largest
+  scale (uv-range matching).
+* **Polarised intensity recovered**: peak of the Faraday spectrum, as a fraction of the truth (which is
+  1 everywhere in these simulations).
+* **Stripes**: a uniform RM gradient rotates the polarisation angle linearly across the sky, so Q and U
+  form stripes with spacing π / (|∇RM| λ²); the code calls this the gradient's "fringe".
+
 A generic interferometer (sharp inner cut fixed in wavelengths, u_min = 10–320 λ) and parametric
 ASKAP (shortest baseline 22 m, 12 m dishes) and MeerKAT (29 m, 13.5 m) arrays, on the common POSSUM band 1
 and on native bands (ASKAP POSSUM band 1+2; MeerKAT UHF 544–1088 and L-band 856–1712 MHz).
