@@ -70,6 +70,9 @@ class SimConfig:
     freq_min_hz: float = 800e6
     freq_max_hz: float = 1088e6
     chan_width_hz: float = 1e6  # POSSUM-like 288 x 1 MHz
+    # optional list of (f_min, f_max, chan_width) [Hz] bands, e.g. POSSUM band 1 + band 2 with
+    # the gap between them; overrides the three fields above when non-empty
+    freq_segments: tuple[tuple[float, float, float], ...] = ()
     p0: float = 1.0  # constant polarised fraction (Stokes I = 1)
     chi0_rad: float = 0.0
     rm_mean: float = 30.0  # rad m^-2
@@ -86,6 +89,10 @@ class SimConfig:
     int_inner: str = "sharp"  # "sharp" (b >= int_bmin_m) or "soft" (edge smeared by antenna aperture)
     ant_diam_m: float = 12.0  # antenna diameter setting the soft inner-edge width
     int_restore_arcmin: float = 0.0  # Gaussian restoring beam FWHM, fixed across band; 0 = none
+    # generic interferometer (test 3): sharp inner cut at a fixed uv distance in wavelengths, the
+    # same in every channel; > 0 overrides int_bmin_m / int_inner / cut_mode for the INT
+    int_umin_lam: float = 0.0
+    scale_metrics: bool = False  # add scale-resolved RM transfer functions to the metrics
     # --- SD + INT combination (test 2)
     combine: str = "none"  # "none", "feather" (CASA-style) or "joint" (Wiener-regularised)
     joint_eps: float = 1e-2  # Wiener regulariser for "joint" (stands in for finite S/N)
@@ -96,8 +103,12 @@ class SimConfig:
     @property
     def freqs(self) -> np.ndarray:
         # channel centres, e.g. 800.5 ... 1087.5 MHz
-        n = int(round((self.freq_max_hz - self.freq_min_hz) / self.chan_width_hz))
-        return self.freq_min_hz + (np.arange(n) + 0.5) * self.chan_width_hz
+        segs = self.freq_segments or ((self.freq_min_hz, self.freq_max_hz, self.chan_width_hz),)
+        out = []
+        for f0, f1, df in segs:
+            n = int(round((f1 - f0) / df))
+            out.append(f0 + (np.arange(n) + 0.5) * df)
+        return np.concatenate(out)
 
     @property
     def lams(self) -> np.ndarray:
@@ -275,7 +286,11 @@ def uv_masks(cfg: SimConfig, uvdist_lam: np.ndarray, lam: float) -> tuple[np.nda
     else:
         raise ValueError(cfg.cut_mode)
     t_sd = sd_transfer(cfg, uvdist_lam * lam_sd)
-    t_int = int_inner_transfer(cfg, uvdist_lam * lam_int) * restore_transfer(cfg, uvdist_lam)
+    if cfg.int_umin_lam > 0:
+        inner = (uvdist_lam >= cfg.int_umin_lam).astype(float)  # generic: cut fixed in wavelengths
+    else:
+        inner = int_inner_transfer(cfg, uvdist_lam * lam_int)
+    t_int = inner * restore_transfer(cfg, uvdist_lam)
     return t_sd, t_int
 
 
@@ -380,6 +395,27 @@ def radial_power(img: np.ndarray, dl: float, nbins: int = 28) -> tuple[np.ndarra
     return centres[np.array(filled) - 1], pk
 
 
+def rm_transfer(rec: np.ndarray, true: np.ndarray, dl: float, nbins: int = 20) -> tuple[np.ndarray, np.ndarray]:
+    """Scale-resolved RM transfer function: Re<R T*> / <|T|^2> in radial uv bins.
+
+    Projection of the recovered RM map onto the true one, scale by scale (both mean-removed,
+    Hann-apodised like ``radial_power``). 1 = that scale is recovered, 0 = lost, < 0 = sign-flipped.
+    Unlike a ratio of power spectra it is not inflated by spurious (uncorrelated) structure.
+    """
+    n = true.shape[0]
+    w = np.outer(np.hanning(n), np.hanning(n))
+    fr = np.fft.fft2((rec - np.nanmean(rec)) * w)
+    ft = np.fft.fft2((true - true.mean()) * w)
+    k = uv_grid(n, dl).ravel()
+    edges = np.geomspace(1.0 / (n * dl), 0.5 / dl, nbins + 1)
+    idx = np.digitize(k, edges)
+    cross = (fr * ft.conj()).real.ravel()
+    pt = (np.abs(ft) ** 2).ravel()
+    filled = [i for i in range(1, nbins + 1) if np.any(idx == i)]
+    t = np.array([cross[idx == i].sum() / pt[idx == i].sum() for i in filled])
+    return np.sqrt(edges[1:] * edges[:-1])[np.array(filled) - 1], t
+
+
 def apply_transfer(img_big: np.ndarray, cfg: SimConfig, transfer: np.ndarray) -> np.ndarray:
     """Filter a padded-box map with a uv transfer function, cropped to the field."""
     return crop(np.fft.ifft2(np.fft.fft2(img_big) * transfer).real, cfg)
@@ -459,7 +495,10 @@ def plot_maps(cfg, rm_true, res, cubes, ichan, path, tag):
 
 def _shade_cuts(ax, cfg):
     lmin, lmax = cfg.lams.min(), cfg.lams.max()
-    if cfg.cut_mode == "baseline":
+    if cfg.int_umin_lam > 0:
+        ax.axvline(cfg.int_umin_lam, color=COLOURS["int"], ls=":", label=f"INT inner cut ({cfg.int_umin_lam:g} λ)")
+        ax.axvspan(cfg.sd_bmax_m / lmax, cfg.sd_bmax_m / lmin, color=COLOURS["sd"], alpha=0.15, label="SD outer cut")
+    elif cfg.cut_mode == "baseline":
         ax.axvspan(
             cfg.sd_bmax_m / lmax,
             cfg.sd_bmax_m / lmin,
@@ -637,13 +676,28 @@ def run(cfg: SimConfig, outdir: Path | None = None, tag: str = "run") -> dict:
         "fwhm_rmsf": res["truth"]["fwhm"],
         "lam_sq_0": res["truth"]["lam_sq_0"],
     }
+    if cfg.scale_metrics:
+        for k in res:
+            u, t = rm_transfer(np.nan_to_num(res[k]["rm"], nan=np.nanmean(res[k]["rm"])), rm_true, cfg.dl)
+            m[k]["rm_transfer"] = t.tolist()
+            # the scale where the array stops recovering RM: first bin (from large scales) with T >= 0.5
+            ok = np.nonzero(t >= 0.5)[0]
+            m[k]["rm_transfer_u50"] = float(u[ok[0]]) if ok.size else float("nan")
+        m["input"]["rm_transfer_u"] = u.tolist()
+        m["input"]["freq_range_mhz"] = [cfg.freqs.min() / 1e6, cfg.freqs.max() / 1e6]
     if outdir is not None:
         outdir.mkdir(parents=True, exist_ok=True)
         ichan = int(np.argmin(np.abs(cfg.freqs - np.sqrt(cfg.freqs.min() * cfg.freqs.max()))))
         label = (
             f"{tag}: <RM>={cfg.rm_mean:g}, σ(δRM)={cfg.rm_sigma:g} rad m⁻², β={cfg.rm_slope:.2f}, "
             f"∇RM={cfg.rm_grad_deg:g} rad m⁻² deg⁻¹, cuts={cfg.cut_mode}\n"
-            f"SD={cfg.sd_model} {cfg.sd_bmax_m:g} m, INT inner={cfg.int_inner}, "
+            f"SD={cfg.sd_model} {cfg.sd_bmax_m:g} m, "
+            + (
+                f"INT u ≥ {cfg.int_umin_lam:g} λ, "
+                if cfg.int_umin_lam > 0
+                else f"INT b ≥ {cfg.int_bmin_m:g} m ({cfg.int_inner}, D={cfg.ant_diam_m:g} m), "
+            )
+            + f"{cfg.freqs.min() / 1e6:.0f}–{cfg.freqs.max() / 1e6:.0f} MHz, "
             f"restore={cfg.int_restore_arcmin:g}′, combine={cfg.combine}"
         )
         plot_maps(cfg, rm_true, res, cubes, ichan, outdir / f"{tag}_maps.png", label)
@@ -724,13 +778,119 @@ def plot_scan(out: dict, param: str, cfg: SimConfig, outdir: Path, xlabel: str, 
 
 
 def scan(base: SimConfig, param: str, values: list[float], outdir: Path, xlabel: str, prefix: str = "") -> dict:
-    """Scan one parameter for both cut modes and plot RM error, RM bias and mean PI."""
+    """Scan one parameter for both cut modes and plot RM error, RM bias and mean PI.
+
+    A generic-interferometer scan (int_umin_lam) runs physical cuts only: its INT cut is fixed in
+    wavelengths already, so "fixed" would only change the single dish.
+    """
     out = {"values": values}
-    for mode in ("baseline", "fixed"):
+    modes = ("baseline",) if param == "int_umin_lam" else ("baseline", "fixed")
+    for mode in modes:
         out[mode] = [run(replace(base, **{param: v}, cut_mode=mode)) for v in values]
     (outdir / f"{prefix}scan_{param}.json").write_text(_dump(out))
-    plot_scan(out, param, base, outdir, xlabel, prefix)
+    if param == "int_umin_lam":
+        plot_ucut_scan(out, base, outdir, prefix)
+    else:
+        plot_scan(out, param, base, outdir, xlabel, prefix)
     return out
+
+
+def _array_ucut_ranges() -> list[tuple[str, float, float, str]]:
+    """(label, u_min at top of band, u_min at bottom of band, colour): each array's shortest baseline in λ."""
+    out = []
+    for i, (arr, band) in enumerate(ARRAY_RUNS):
+        c = array_config(SimConfig(), arr, band)
+        out.append((f"{arr} {band}", c.int_bmin_m / c.lams.max(), c.int_bmin_m / c.lams.min(), f"C{i + 3}"))
+    return out
+
+
+def plot_ucut_scan(out: dict, cfg: SimConfig, outdir: Path, prefix: str) -> None:
+    """Generic interferometer: what an inner uv cut u_min [λ] does to RM and PI, scale by scale."""
+    values = np.array(out["values"], float)
+    runs = out["baseline"]
+    fig, axs = plt.subplots(1, 4, figsize=(20, 4.4), constrained_layout=True)
+    a = axs[0]
+    a.plot(values, [r["int"]["rm_rms_err"] for r in runs], "o-", color=COLOURS["int"], label="INT rms error")
+    a.plot(values, [abs(r["int"]["rm_bias"]) for r in runs], "s--", color=COLOURS["int"], label="INT |bias|")
+    a.axhline(runs[0]["sd"]["rm_rms_err"], color=COLOURS["sd"], lw=1, label="single dish rms error")
+    a.axhline(runs[0]["input"]["rm_std"], color="k", ls="--", lw=1, label="input RM std")
+    a.axhline(runs[0]["input"]["fwhm_rmsf"] / 2, color="0.6", lw=0.8, label="RMSF FWHM / 2")
+    a.set(ylabel="[rad m$^{-2}$]", title="Peak-RM error vs inner cut", yscale="log")
+    axs[1].plot(values, [r["int"]["rm_corr_with_true"] for r in runs], "o-", color=COLOURS["int"], label="RM corr")
+    axs[1].plot(values, [r["int"]["pi_mean"] for r in runs], "s-", color="tab:purple", label="mean PI (true 1)")
+    axs[1].plot(values, [r["int"]["qu_power_retained"] for r in runs], "^:", color="tab:gray", label="Q/U power kept")
+    axs[1].set(title="INT: RM correlation, PI and Q/U power", ylim=(0, 1.05))
+    for ax in axs[:2]:
+        for lab, lo, hi, col in _array_ucut_ranges():
+            ax.axvspan(lo, hi, color=col, alpha=0.12, label=f"{lab} shortest baseline")
+        ax.set(xlabel="INT inner cut u$_{min}$ [λ]", xscale="log")
+        ax.legend(fontsize=6)
+    # scale-resolved RM transfer for each cut
+    u = np.array(runs[0]["input"]["rm_transfer_u"])
+    cmap = plt.get_cmap("viridis")
+    for i, (v, r) in enumerate(zip(values, runs, strict=True)):
+        col = cmap(i / max(len(values) - 1, 1))
+        axs[2].semilogx(u, r["int"]["rm_transfer"], color=col, label=f"u$_{{min}}$={v:g} λ")
+        axs[2].axvline(v, color=col, ls=":", lw=0.8)
+    axs[2].semilogx(u, runs[0]["sd"]["rm_transfer"], color=COLOURS["sd"], lw=2.5, alpha=0.6, label="single dish")
+    axs[2].axhline(1, color="0.6", lw=0.8)
+    axs[2].axhline(0, color="0.6", lw=0.8)
+    axs[2].set(xlabel="uv distance u [λ]", ylabel="Re⟨RM̂ RM*⟩ / ⟨|RM|²⟩", title="INT RM transfer function",
+               ylim=(-0.3, 1.2))  # fmt: skip
+    axs[2].legend(fontsize=6, ncol=2)
+    _scale_axis(axs[2])
+    axs[3].plot(values, [r["int"]["rm_transfer_u50"] for r in runs], "o-", color=COLOURS["int"])
+    axs[3].plot(values, values, "k--", lw=1, label="u$_{50}$ = u$_{min}$")
+    axs[3].set(xlabel="INT inner cut u$_{min}$ [λ]", ylabel="u$_{50}$ [λ]", xscale="log", yscale="log",
+               title="Largest RM scale recovered (T ≥ 0.5)")  # fmt: skip
+    axs[3].legend(fontsize=7)
+    fig.suptitle(
+        f"{prefix}generic interferometer (sharp cut in λ, same every channel), "
+        f"{cfg.freqs.min() / 1e6:.0f}–{cfg.freqs.max() / 1e6:.0f} MHz, σ(δRM)={cfg.rm_sigma:g}, "
+        f"∇RM={cfg.rm_grad_deg:g}, SD={cfg.sd_model} {cfg.sd_bmax_m:g} m",
+        fontsize=10,
+    )
+    fig.savefig(outdir / f"{prefix}scan_int_umin_lam.png", dpi=110)
+    plt.close(fig)
+
+
+def plot_array_comparison(summary: dict, cfgs: dict[str, SimConfig], path: Path) -> None:
+    """ASKAP / MeerKAT across bands: RM transfer functions and headline metrics side by side."""
+    tags = [t for t in summary if not t.endswith("_fixedcuts")]
+    fig, axs = plt.subplots(1, 3, figsize=(19, 4.8), constrained_layout=True)
+    for i, tag in enumerate(tags):
+        m, c = summary[tag], cfgs[tag]
+        col = f"C{i}"
+        u = np.array(m["input"]["rm_transfer_u"])
+        axs[0].semilogx(u, m["int"]["rm_transfer"], color=col, label=tag.removeprefix("t3_"))
+        fx = summary.get(f"{tag}_fixedcuts")
+        if fx:
+            axs[0].semilogx(u, fx["int"]["rm_transfer"], ":", color=col)
+        axs[0].axvspan(c.int_bmin_m / c.lams.max(), c.int_bmin_m / c.lams.min(), color=col, alpha=0.08)
+    axs[0].semilogx(u, summary[tags[0]]["sd"]["rm_transfer"], color=COLOURS["sd"], lw=2.5, alpha=0.5,
+                    label=f"single dish ({tags[0].removeprefix('t3_')})")  # fmt: skip
+    axs[0].axhline(1, color="0.6", lw=0.8)
+    axs[0].axhline(0, color="0.6", lw=0.8)
+    axs[0].set(xlabel="uv distance u [λ]", ylabel="RM transfer", ylim=(-0.3, 1.2),
+               title="INT RM transfer (solid: physical cuts, dotted: uv-matched)")  # fmt: skip
+    axs[0].legend(fontsize=7)
+    _scale_axis(axs[0])
+    x = np.arange(len(tags))
+    w = 0.38
+    for j, (suffix, hatch) in enumerate((("", None), ("_fixedcuts", "//"))):
+        vals = [summary.get(t + suffix, {}).get("int", {}) for t in tags]
+        axs[1].bar(x + (j - 0.5) * w, [v.get("rm_rms_err", np.nan) for v in vals], w, hatch=hatch,
+                   color=[f"C{i}" for i in range(len(tags))], edgecolor="k",
+                   label="physical cuts" if j == 0 else "uv-matched")  # fmt: skip
+        axs[2].bar(x + (j - 0.5) * w, [v.get("pi_mean", np.nan) for v in vals], w, hatch=hatch,
+                   color=[f"C{i}" for i in range(len(tags))], edgecolor="k")  # fmt: skip
+    axs[1].set(ylabel="rms(RM − true) [rad m$^{-2}$]", title="INT peak-RM error")
+    axs[2].set(ylabel="mean peak PI (true 1)", title="INT recovered PI")
+    for ax in axs[1:]:
+        ax.set_xticks(x, [t.removeprefix("t3_").replace("_", "\n", 1) for t in tags], fontsize=8)
+    axs[1].legend(fontsize=7)
+    fig.savefig(path, dpi=110)
+    plt.close(fig)
 
 
 def plot_transfer(cfgs: dict[str, SimConfig], path: Path) -> None:
@@ -768,6 +928,31 @@ GRAD_LABEL = "mean-RM gradient [rad m$^{-2}$ deg$^{-1}$]"
 SIGMA_LABEL = r"$\sigma(\delta RM)$ [rad m$^{-2}$]"
 
 
+# Test 3: interferometers. Parametric: in this noiseless, ideally deconvolved limit only the coverage
+# edges matter (uv density / weighting only matters with noise), and the 2.3' pixel grid only reaches
+# u ~ 730 λ (b ~ 200-300 m), far below either array's longest baselines, so only the shortest baseline
+# and the dish diameter (which smears the inner edge, see int_inner_transfer) enter.
+ARRAYS = {
+    "askap": dict(int_bmin_m=22.0, ant_diam_m=12.0, int_inner="soft"),  # 36 x 12 m, shortest baseline ~22 m
+    "meerkat": dict(int_bmin_m=29.0, ant_diam_m=13.5, int_inner="soft"),  # 64 x 13.5 m, shortest ~29 m
+}
+BANDS = {  # (f_min, f_max, channel width) segments [Hz]
+    "possum1": ((800e6, 1088e6, 1e6),),  # POSSUM band 1: the common band
+    "possum12": ((800e6, 1088e6, 1e6), (1296e6, 1440e6, 1e6)),  # ASKAP POSSUM band 1 + band 2
+    "uhf": ((544e6, 1088e6, 2e6),),  # MeerKAT UHF
+    "lband": ((856e6, 1712e6, 2e6),),  # MeerKAT L-band
+}
+ARRAY_RUNS = [("askap", "possum1"), ("meerkat", "possum1"), ("askap", "possum12"), ("meerkat", "uhf"),
+              ("meerkat", "lband")]  # fmt: skip
+UCUT_VALUES = [10, 20, 30, 45, 60, 80, 110, 160, 240, 320]
+UCUT_LABEL = "INT inner cut u$_{min}$ [λ]"
+
+
+def array_config(cfg: SimConfig, array: str, band: str) -> SimConfig:
+    """Apply an array preset (shortest baseline, dish diameter) and a band preset."""
+    return replace(cfg, **ARRAYS[array], freq_segments=BANDS[band], int_umin_lam=0.0)
+
+
 def _examples(cfg: SimConfig, prefix: str, fixed: bool = True) -> dict[str, SimConfig]:
     """Standard example cases: base, gradient 50, weak screen, and uv-matched versions."""
     out = {
@@ -787,9 +972,36 @@ def suite(name: str, base: SimConfig, outdir: Path, part: str = "all") -> None:
     name: "base"  - sharp cuts (original tests)
           "t1"    - realistic responses (aperture-tapered dish, soft INT inner edge)
           "t2"    - realistic responses + SD/INT combination (feather and joint)
-    part: "all", "runs", "scan_grad", "scan_sigma" (t2 scans take a ":feather"/":joint" suffix)
+          "t3"    - interferometers: generic cut in λ, ASKAP and MeerKAT on common and native bands
+    part: "all", "runs", "scan_grad", "scan_sigma" (t2 scans take a ":feather"/":joint" suffix);
+          t3 has "runs" and "scan_ucut" (":weak" / ":grad" suffixes pick one sky)
     """
     real = replace(base, **REALISTIC)
+    global ERR_LIM
+    if name == "t3":
+        if ERR_LIM is None:  # one RM-error colour scale for every band: the POSSUM band-1 RMSF FWHM / 2
+            ERR_LIM = rm_synthesis(np.ones((base.freqs.size, 2, 2), complex), base)["fwhm"] / 2
+        t3 = replace(real, scale_metrics=True)
+        cfgs = {}
+        for arr, band in ARRAY_RUNS:
+            c = array_config(t3, arr, band)
+            cfgs[f"t3_{arr}_{band}"] = c
+            cfgs[f"t3_{arr}_{band}_fixedcuts"] = replace(c, cut_mode="fixed")
+        part, _, which = part.partition(":")
+        if part in ("all", "runs"):
+            plot_transfer({k: v for k, v in cfgs.items() if not k.endswith("_fixedcuts")},
+                          outdir / "t3_transfer_functions.png")  # fmt: skip
+            summary = {tag: run(c, outdir, tag=tag) for tag, c in cfgs.items()}
+            (outdir / "t3_summary.json").write_text(_dump(summary))
+            plot_array_comparison(summary, cfgs, outdir / "t3_array_comparison.png")
+        skies = {"t3_generic_": t3, "t3_generic_weak_screen_": replace(t3, rm_sigma=2.0),
+                 "t3_generic_grad50_": replace(t3, rm_grad_deg=50.0)}  # fmt: skip
+        if part in ("all", "scan_ucut"):
+            for prefix, c in skies.items():
+                if which and which not in prefix.removeprefix("t3_generic"):
+                    continue
+                scan(c, "int_umin_lam", UCUT_VALUES, outdir, UCUT_LABEL, prefix=prefix)
+        return
     if name == "base":
         runs = _examples(base, "base")
         scans = {"": base}
@@ -847,15 +1059,19 @@ def main() -> None:
     ap.add_argument("--int-restore-arcmin", type=float, default=0.0)
     ap.add_argument(
         "--suite",
-        choices=("base", "t1", "t2"),
+        choices=("base", "t1", "t2", "t3"),
         default=None,
-        help="test suite: base = sharp cuts, t1 = realistic responses, t2 = SD+INT combination",
+        help="test suite: base = sharp cuts, t1 = realistic responses, t2 = SD+INT combination, "
+        "t3 = interferometers (generic λ cut, ASKAP, MeerKAT)",
     )
     ap.add_argument(
         "--part", default="all", help="all | runs | scan_grad | scan_sigma (t2 scans: e.g. scan_grad:feather)"
     )
     ap.add_argument("--sd-diam", type=float, default=64.0, help="single-dish diameter [m]")
     ap.add_argument("--combine", choices=("none", "feather", "joint"), default="none")
+    ap.add_argument("--array", choices=tuple(ARRAYS), default=None, help="INT preset (sets inner edge, dish)")
+    ap.add_argument("--band", choices=tuple(BANDS), default=None, help="frequency preset")
+    ap.add_argument("--int-umin-lam", type=float, default=0.0, help="generic INT: sharp inner cut [λ]")
     ap.add_argument(
         "--err-lim",
         type=float,
@@ -881,7 +1097,12 @@ def main() -> None:
         int_restore_arcmin=args.int_restore_arcmin,
         sd_bmax_m=args.sd_diam,
         combine=args.combine,
+        int_umin_lam=args.int_umin_lam,
     )
+    if args.array:
+        cfg = replace(cfg, **ARRAYS[args.array])
+    if args.band:
+        cfg = replace(cfg, freq_segments=BANDS[args.band])
     args.outdir.mkdir(parents=True, exist_ok=True)
     if args.suite:
         suite(args.suite, cfg, args.outdir, args.part)

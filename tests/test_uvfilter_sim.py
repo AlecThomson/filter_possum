@@ -88,3 +88,47 @@ def test_joint_combination_recovers_truth():
     assert m["comb"]["rm_rms_err"] < 0.05
     assert m["comb"]["pi_mean"] > 0.99
     assert m["int"]["rm_rms_err"] > 10 * m["comb"]["rm_rms_err"]  # INT alone is much worse
+
+
+# --------------------------------------------------------------- test 3: interferometers
+
+
+def test_generic_lambda_cut_equals_uv_matched_sharp_cut():
+    """A sharp cut fixed in wavelengths at b_min / lambda_min is exactly uv-range matching."""
+    cfg = replace(SMALL, cut_mode="fixed")
+    gen = replace(SMALL, int_umin_lam=SMALL.int_bmin_m / SMALL.lams.min())
+    phi = sim.make_rm_sky(cfg)
+    np.testing.assert_array_equal(sim.observe(cfg, phi)["int"], sim.observe(gen, phi)["int"])
+
+
+@pytest.mark.parametrize("umin", [40.0, 120.0])
+def test_generic_cut_weak_screen_pi_traces_high_passed_rm(umin):
+    """Weak-screen result holds for any fixed-λ cut: PI_int ~= 2 lambda_0^2 |delta_phi_HP(u >= u_min)|."""
+    cfg = replace(sim.SimConfig(npix=64), rm_sigma=1.0, int_umin_lam=umin)
+    phi = sim.make_rm_sky(cfg)
+    res = sim.rm_synthesis(sim.observe(cfg, phi)["int"], cfg)
+    hp = sim.apply_transfer(phi - cfg.rm_mean, cfg, sim.uv_grid(cfg.nbig, cfg.dl) >= umin)
+    pred = 2 * res["lam_sq_0"] * np.abs(hp)
+    assert np.corrcoef(res["pi"].ravel(), pred.ravel())[0, 1] > 0.99
+    assert res["pi"].mean() / pred.mean() == pytest.approx(1.0, abs=0.05)
+
+
+def test_rm_transfer_is_one_for_truth_and_tracks_a_known_filter():
+    m = sim.run(replace(SMALL, scale_metrics=True))
+    np.testing.assert_allclose(m["truth"]["rm_transfer"], 1.0, atol=1e-3)
+    # a pure linear filter of the RM map gives back (approximately, given apodisation) its transfer function
+    cfg = sim.SimConfig(npix=64)
+    phi = sim.make_rm_sky(cfg)
+    uvd = sim.uv_grid(cfg.nbig, cfg.dl)
+    filt = sim.apply_transfer(phi, cfg, uvd >= 50.0)
+    u, t = sim.rm_transfer(filt, sim.crop(phi, cfg), cfg.dl)
+    assert np.all(t[u < 25] < 0.15) and np.all(t[u > 100] > 0.85)
+
+
+def test_band_presets():
+    """Default band is POSSUM band 1; band 1 + 2 keeps the gap; array preset sets the INT edge."""
+    np.testing.assert_array_equal(sim.SimConfig().freqs, replace(SMALL, freq_segments=sim.BANDS["possum1"]).freqs)
+    f = replace(SMALL, freq_segments=sim.BANDS["possum12"]).freqs
+    assert f.size == 288 + 144 and not np.any((f > 1088e6) & (f < 1296e6))
+    c = sim.array_config(REAL, "askap", "possum1")
+    assert sim.int_inner_transfer(c, np.array([22.0]))[0] == pytest.approx(0.5, abs=0.01)
