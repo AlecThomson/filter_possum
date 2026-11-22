@@ -1,0 +1,101 @@
+{
+  "config": {
+    "fov_deg": 5.0,
+    "npix": 128,
+    "pad": 2,
+    "freq_min_hz": 800000000.0,
+    "freq_max_hz": 1088000000.0,
+    "chan_width_hz": 1000000.0,
+    "p0": 1.0,
+    "chi0_rad": 0.0,
+    "rm_mean": 30.0,
+    "rm_sigma": 10.0,
+    "rm_slope": -3.66667,
+    "rm_grad_deg": 50.0,
+    "grad_ramp_frac": 0.7,
+    "sd_bmax_m": 64.0,
+    "int_bmin_m": 30.0,
+    "cut_mode": "baseline",
+    "sd_model": "aperture",
+    "sd_edge_taper_db": 12.0,
+    "int_inner": "soft",
+    "ant_diam_m": 12.0,
+    "int_restore_arcmin": 0.0,
+    "combine": "joint",
+    "joint_eps": 0.01,
+    "phi_max": 400.0,
+    "dphi": 2.0,
+    "seed": 42
+  },
+  "metrics": {
+    "truth": {
+      "rm_mean_recovered": 27.6975,
+      "rm_bias": 1.225e-06,
+      "rm_rms_err": 0.000239401,
+      "rm_rms_err_pi_weighted": 0.000239401,
+      "rm_corr_with_true": 1.0,
+      "frac_abs_err_gt_halfFWHM": 0.0,
+      "pi_mean": 0.999999,
+      "pi_std": 4.15529e-07,
+      "pi_p05_p95": [
+        0.999999,
+        1.0
+      ],
+      "qu_power_retained": 1.0
+    },
+    "sd": {
+      "rm_mean_recovered": 27.8222,
+      "rm_bias": 0.124703,
+      "rm_rms_err": 7.71239,
+      "rm_rms_err_pi_weighted": 6.02472,
+      "rm_corr_with_true": 0.995679,
+      "frac_abs_err_gt_halfFWHM": 0.00274658,
+      "pi_mean": 0.345806,
+      "pi_std": 0.113621,
+      "pi_p05_p95": [
+        0.173566,
+        0.556087
+      ],
+      "qu_power_retained": 0.159155,
+      "rm_rms_err_vs_smoothed_truth": 8.16499
+    },
+    "int": {
+      "rm_mean_recovered": 27.835,
+      "rm_bias": 0.137444,
+      "rm_rms_err": 8.59842,
+      "rm_rms_err_pi_weighted": 7.26034,
+      "rm_corr_with_true": 0.994492,
+      "frac_abs_err_gt_halfFWHM": 0.00280762,
+      "pi_mean": 0.623968,
+      "pi_std": 0.153977,
+      "pi_p05_p95": [
+        0.358307,
+        0.874743
+      ],
+      "qu_power_retained": 0.513649,
+      "rm_rms_err_vs_smoothed_truth": 8.59842
+    },
+    "comb": {
+      "rm_mean_recovered": 27.6974,
+      "rm_bias": -0.000160013,
+      "rm_rms_err": 0.0705027,
+      "rm_rms_err_pi_weighted": 0.0705075,
+      "rm_corr_with_true": 1.0,
+      "frac_abs_err_gt_halfFWHM": 0.0,
+      "pi_mean": 0.981486,
+      "pi_std": 0.00253029,
+      "pi_p05_p95": [
+        0.977296,
+        0.985635
+      ],
+      "qu_power_retained": 0.963386,
+      "rm_rms_err_vs_smoothed_truth": 0.0705027
+    },
+    "input": {
+      "rm_mean": 27.6975,
+      "rm_std": 82.0229,
+      "fwhm_rmsf": 59.1343,
+      "lam_sq_0": 0.103258
+    }
+  }
+}
