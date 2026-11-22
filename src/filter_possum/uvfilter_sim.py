@@ -38,7 +38,9 @@ from pathlib import Path
 
 import dask.array as da
 import matplotlib
+import matplotlib.lines
 import matplotlib.ticker
+import matplotlib.transforms
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
@@ -928,6 +930,281 @@ def plot_array_comparison(summary: dict, cfgs: dict[str, SimConfig], path: Path)
     plt.close(fig)
 
 
+# ------------------------------------------------- test 3 headline figures (one question each)
+
+# validated 3-slot categorical palette (dataviz reference palette, light mode, all-pairs CVD-safe);
+# aqua is < 3:1 on white, so wherever it appears it is direct-labelled
+INK, INK2, GRID = "#0b0b0b", "#52514e", "#e4e3df"
+C1, C2, C3 = "#2a78d6", "#eb6834", "#1baf7a"
+DIVERGING = matplotlib.colors.LinearSegmentedColormap.from_list(
+    "bgo", ["#184f95", "#3987e5", "#e9e8e4", "#ee7d4f", "#a33a10"]
+)
+SEQ_BLUE = matplotlib.colors.LinearSegmentedColormap.from_list(
+    "blue", ["#f7f9fc", "#b7d3f6", "#5598e7", "#1c5cab", "#0d366b"]
+)
+
+
+def _style(ax, grid_axis="y"):
+    """Recessive chrome: no top/right spines, hairline solid grid, muted ticks."""
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_color(INK2)
+        ax.spines[side].set_linewidth(0.6)
+    ax.tick_params(colors=INK2, labelsize=9, width=0.6)
+    if grid_axis:
+        ax.grid(axis=grid_axis, color=GRID, lw=0.6)
+        ax.set_axisbelow(True)
+    ax.xaxis.label.set_color(INK)
+    ax.yaxis.label.set_color(INK)
+
+
+def _title(fig_or_ax, headline: str, sub: str = "", fig=True):
+    """Headline states the takeaway; subtitle states the setup."""
+    if fig:
+        fig_or_ax.text(0.01, 0.99, headline, fontsize=13, weight="bold", color=INK, va="top", ha="left")
+        if sub:
+            fig_or_ax.text(0.01, 0.94, sub, fontsize=9.5, color=INK2, va="top", ha="left")
+    else:
+        fig_or_ax.set_title(headline, fontsize=10.5, color=INK, loc="left")
+
+
+def _int_maps(cfg: SimConfig) -> dict:
+    """INT RM/PI maps plus the analytic references: RM on scales above the cut, 2 lambda0^2 |RM below it|."""
+    phi = make_rm_sky(cfg)
+    res = rm_synthesis(observe(cfg, phi)["int"], cfg)
+    uvd = uv_grid(cfg.nbig, cfg.dl)
+    if cfg.int_umin_lam > 0:
+        t_in = (uvd >= cfg.int_umin_lam).astype(float)
+    else:
+        lam_ref = cfg.lams.min() if cfg.cut_mode == "fixed" else np.sqrt(res["lam_sq_0"])
+        t_in = int_inner_transfer(cfg, uvd * lam_ref)
+    return {
+        "rm": res["rm"],
+        "pi": res["pi"],
+        "rm_true": crop(phi, cfg),
+        "rm_large": apply_transfer(phi, cfg, 1.0 - t_in),  # what the INT's RM should follow
+        "pi_pred": 2 * res["lam_sq_0"] * np.abs(apply_transfer(phi - cfg.rm_mean, cfg, t_in)),
+    }
+
+
+def fig_what_int_measures(path: Path) -> None:
+    """Fig 1: an interferometer's RM is the large-scale RM; its PI is the small-scale RM's magnitude."""
+    cfg = replace(array_config(SimConfig(**REALISTIC), "askap", "possum1"), cut_mode="fixed", rm_sigma=2.0)
+    m = _int_maps(cfg)
+    ext = [cfg.fov_deg / 2, -cfg.fov_deg / 2, -cfg.fov_deg / 2, cfg.fov_deg / 2]
+    fig, axs = plt.subplots(2, 2, figsize=(10, 9.6))
+    fig.subplots_adjust(left=0.06, right=0.9, top=0.86, bottom=0.05, wspace=0.08, hspace=0.22)
+    lim = np.percentile(np.abs(m["rm_large"] - cfg.rm_mean), 99)
+    rm_kw = dict(cmap=DIVERGING, vmin=cfg.rm_mean - lim, vmax=cfg.rm_mean + lim)
+    pi_kw = dict(cmap=SEQ_BLUE, vmin=0, vmax=np.percentile(m["pi_pred"], 99))
+    panels = [
+        (m["rm_large"], "Expected: true RM, scales larger than the cut", rm_kw),
+        (m["rm"], "Interferometer peak RM", rm_kw),
+        (m["pi_pred"], "Expected: 2λ₀² × |true RM, scales smaller than the cut|", pi_kw),
+        (m["pi"], "Interferometer peak PI  (true PI = 1)", pi_kw),
+    ]
+    for ax, (img, title, kw) in zip(axs.flat, panels, strict=True):
+        ax.imshow(img, origin="lower", extent=ext, **kw)
+        ax.set_title(title, fontsize=10, color=INK, loc="left")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for sp in ax.spines.values():
+            sp.set_visible(False)
+    for row, lab in enumerate(("RM [rad m⁻²]", "PI / p₀")):
+        cax = fig.add_axes([0.915, axs[row, 1].get_position().y0, 0.015, axs[row, 1].get_position().height])
+        cb = fig.colorbar(axs[row, 1].images[0], cax=cax)
+        cb.set_label(lab, color=INK, fontsize=9)
+        cb.ax.tick_params(labelsize=8, colors=INK2)
+        cb.outline.set_visible(False)
+    c_rm = np.corrcoef(m["rm"].ravel(), m["rm_large"].ravel())[0, 1]
+    c_pi = np.corrcoef(m["pi"].ravel(), m["pi_pred"].ravel())[0, 1]
+    axs[0, 1].text(0.02, 0.02, f"correlation with left: {c_rm:.2f}", transform=axs[0, 1].transAxes, fontsize=9,
+                   color=INK, bbox=dict(fc="white", ec="none", alpha=0.85))  # fmt: skip
+    axs[1, 1].text(0.02, 0.02, f"correlation with left: {c_pi:.2f}", transform=axs[1, 1].transAxes, fontsize=9,
+                   color=INK, bbox=dict(fc="white", ec="none", alpha=0.85))  # fmt: skip
+    _title(fig, "An interferometer's RM map shows large-scale RM; its PI map shows small-scale RM",
+           f"ASKAP-like (22 m shortest baseline, uv-matched: u ≥ {cfg.int_bmin_m / cfg.lams.min():.0f} λ ≈ "
+           f"{1 / (cfg.int_bmin_m / cfg.lams.min()) / DEG:.1f}°), POSSUM band 1, weak screen σ(δRM) = 2 rad m⁻². "
+           "5° field.")  # fmt: skip
+    fig.savefig(path, dpi=130, facecolor="white")
+    plt.close(fig)
+
+
+def fig_errors_at_pi_nulls(path: Path) -> None:
+    """Fig 2: where the INT RM errors are: binned by the INT's own PI."""
+    fig, ax = plt.subplots(figsize=(8, 5))
+    fig.subplots_adjust(left=0.1, right=0.8, top=0.8, bottom=0.12)
+    base = array_config(SimConfig(**REALISTIC), "askap", "possum1")
+    nb = 10
+    centres = (np.arange(nb) + 0.5) * 100 / nb
+    for cfg, col, lab in ((base, C2, "physical uv cut"), (replace(base, cut_mode="fixed"), C1, "uv-matched")):
+        m = _int_maps(cfg)
+        err = np.abs(m["rm"] - m["rm_true"]).ravel()
+        rank = np.argsort(np.argsort(m["pi"].ravel())) / err.size  # PI percentile of each pixel
+        med = [np.median(err[(rank >= i / nb) & (rank < (i + 1) / nb)]) for i in range(nb)]
+        ax.plot(centres, med, "-o", color=col, lw=2, ms=6, mec="white", mew=1.5)
+        ax.annotate(lab, (centres[-1], med[-1]), xytext=(8, 0), textcoords="offset points", va="center",
+                    color=INK, fontsize=10)  # fmt: skip
+    ax.set(xlabel="Interferometer PI percentile (0 = faintest pixels, 100 = brightest)",
+           ylabel="median |RM error| [rad m⁻²]", xlim=(0, 100), ylim=(0, None))  # fmt: skip
+    _style(ax)
+    _title(fig, "The interferometer's RM errors sit where its PI is faint",
+           "ASKAP-like, POSSUM band 1, default sky (σ(δRM) = 10 rad m⁻²). Pixels binned in tenths by the\n"
+           "interferometer's own PI: a signal-to-noise mask removes most of the error.")  # fmt: skip
+    fig.savefig(path, dpi=130, facecolor="white")
+    plt.close(fig)
+
+
+def _arrays_on_axis(ax, top: float = 0.97, step: float = 0.065):
+    """Each array's shortest baseline as a u_min range across its band, one row each, direct-labelled.
+
+    Rows sit in axes-fraction y (works on linear and log axes) so overlapping ranges never collide.
+    """
+    trans = matplotlib.transforms.blended_transform_factory(ax.transData, ax.transAxes)
+    names = {"possum1": "POSSUM-1", "uhf": "UHF", "lband": "L-band"}
+    for i, (arr, band) in enumerate((("askap", "possum1"), ("meerkat", "possum1"), ("meerkat", "uhf"),
+                                     ("meerkat", "lband"))):  # fmt: skip
+        c = array_config(SimConfig(), arr, band)
+        lo, hi = c.int_bmin_m / c.lams.max(), c.int_bmin_m / c.lams.min()
+        y = top - i * step
+        ax.plot([lo, hi], [y, y], color=INK2, lw=2, solid_capstyle="butt", transform=trans, clip_on=False)
+        ax.annotate(f"{'ASKAP' if arr == 'askap' else 'MeerKAT'} {names[band]}", (hi, y), xycoords=trans,
+                    xytext=(4, 0), textcoords="offset points", va="center", fontsize=7.5, color=INK2)  # fmt: skip
+
+
+def fig_inner_cut(outdir: Path, path: Path) -> None:
+    """Fig 3: generic interferometer: RM error and PI vs the inner cut."""
+    d = json.loads((outdir / "t3_generic_scan_int_umin_lam.json").read_text())
+    u = np.array(d["values"], float)
+    runs = d["baseline"]
+    fig, axs = plt.subplots(1, 2, figsize=(12, 5))
+    fig.subplots_adjust(left=0.07, right=0.97, top=0.78, bottom=0.13, wspace=0.28)
+    a = axs[0]
+    for key, col, lab in (("rm_rms_err", C2, "all pixels"), ("rm_rms_err_bright_half", C1, "brighter half of PI")):
+        y = [r["int"][key] for r in runs]
+        a.plot(u, y, "-o", color=col, lw=2, ms=6, mec="white", mew=1.5)
+        a.annotate(lab, (u[-1], y[-1]), xytext=(8, 0), textcoords="offset points", va="center", color=INK,
+                   fontsize=9.5)  # fmt: skip
+    sd = runs[0]["sd"]["rm_rms_err"]
+    a.axhline(sd, color=INK2, lw=1)
+    a.annotate(f"64 m single dish ({sd:.1f})", (u[0], sd), xytext=(0, -12), textcoords="offset points",
+               fontsize=8.5, color=INK2)  # fmt: skip
+    a.set(xscale="log", xlabel=r"interferometer inner cut $u_{\rm min}$ [λ]", ylabel="rms RM error [rad m⁻²]",
+          ylim=(0, 12), xlim=(8, 900))  # fmt: skip
+    _arrays_on_axis(a)
+    _title(a, "RM error: smaller with a larger cut", fig=False)
+    _style(a)
+    b = axs[1]
+    y = np.array([r["int"]["pi_mean"] for r in runs])
+    b.plot(u, y, "-o", color=C1, lw=2, ms=6, mec="white", mew=1.5)
+    # analytic scaling: rms of the high-passed RM ~ u_min^((beta + 2) / 2) for P(k) ~ k^beta
+    slope = (-11 / 3 + 2) / 2
+    ref = y[5] * (u / u[5]) ** slope
+    b.plot(u, ref, color=INK2, lw=1)
+    b.annotate(
+        r"expected slope $-5/6$ (RM spectrum $\propto k^{-11/3}$)",
+        (u[1], ref[1]),
+        xytext=(10, 6),
+        textcoords="offset points",
+        ha="left",
+        va="bottom",
+        fontsize=8.5,
+        color=INK2,
+    )
+    b.set(xscale="log", yscale="log", xlabel=r"interferometer inner cut $u_{\rm min}$ [λ]",
+          ylabel="mean peak PI (true = 1)", ylim=(0.03, 6), xlim=(8, 900))  # fmt: skip
+    _arrays_on_axis(b)
+    _title(b, "Recovered PI: falls steadily with the cut", fig=False)
+    _style(b)
+    _title(fig, "A larger inner cut gives a cleaner RM map but much less polarised signal",
+           "Generic interferometer: sharp cut fixed in wavelengths, POSSUM band 1, default sky (σ(δRM) = 10 rad m⁻²),"
+           " noiseless.\nWith noise, the falling PI will set an optimum cut. Grey bars: each array's shortest baseline "
+           "across its band.")  # fmt: skip
+    fig.savefig(path, dpi=130, facecolor="white")
+    plt.close(fig)
+
+
+def fig_arrays(outdir: Path, path: Path) -> None:
+    """Fig 4: ASKAP vs MeerKAT by band: dumbbells, physical cut -> uv-matched."""
+    s = json.loads((outdir / "t3_summary.json").read_text())
+    rows = [("askap", "possum1", "ASKAP · POSSUM band 1"), ("meerkat", "possum1", "MeerKAT · POSSUM band 1"),
+            ("askap", "possum12", "ASKAP · POSSUM bands 1+2"), ("meerkat", "uhf", "MeerKAT · UHF"),
+            ("meerkat", "lband", "MeerKAT · L-band")]  # fmt: skip
+    fig, axs = plt.subplots(1, 2, figsize=(12, 4.6), sharey=True)
+    fig.subplots_adjust(left=0.2, right=0.97, top=0.76, bottom=0.13, wspace=0.12)
+    y = np.arange(len(rows))[::-1]
+    for ax, key, xlab, title in ((axs[0], "rm_rms_err", "rms RM error [rad m⁻²]", "RM error"),
+                                 (axs[1], "pi_mean", "mean peak PI (true = 1)", "Recovered PI")):  # fmt: skip
+        for yi, (arr, band, _) in zip(y, rows, strict=True):
+            a = s[f"t3_{arr}_{band}"]["int"][key]
+            b = s[f"t3_{arr}_{band}_fixedcuts"]["int"][key]
+            ax.plot([a, b], [yi, yi], color=GRID, lw=3, solid_capstyle="round", zorder=1)
+            ax.scatter([a], [yi], s=70, color=C2, edgecolor="white", lw=1.5, zorder=3)
+            ax.scatter([b], [yi], s=70, color=C1, edgecolor="white", lw=1.5, zorder=3)
+        ax.set(xlabel=xlab, xlim=(0, None))
+        _title(ax, title, fig=False)
+        _style(ax, grid_axis="x")
+        ax.spines["left"].set_visible(False)
+        ax.tick_params(axis="y", length=0)
+    axs[0].set_yticks(y, [r[2] for r in rows], fontsize=10, color=INK)
+    key = [
+        matplotlib.lines.Line2D([], [], ls="", marker="o", ms=8, mfc=c, mec="white", label=lab)
+        for c, lab in ((C2, "physical uv cut (moves across the band)"), (C1, "uv-matched across the band"))
+    ]
+    fig.legend(handles=key, loc="upper right", bbox_to_anchor=(0.97, 0.99), frameon=False, fontsize=9.5)  # fmt: skip
+    axs[0].set_ylim(-0.6, len(rows) - 0.3)
+    _title(fig, "The band matters more than the array; matching uv coverage across the band always helps",
+           "Interferometer only, default sky (σ(δRM) = 10 rad m⁻²), noiseless. ASKAP: 22 m shortest baseline, 12 m "
+           "dishes; MeerKAT: 29 m, 13.5 m.\nLower frequencies give more PI (angle gradients ∝ λ²). Wide bands "
+           "gain most from uv matching (L-band 8.5 → 2.4).")  # fmt: skip
+    fig.savefig(path, dpi=130, facecolor="white")
+    plt.close(fig)
+
+
+def fig_gradient(outdir: Path, path: Path) -> None:
+    """Fig 5: a strong RM gradient survives an interferometer only below its fringe scale."""
+    d = json.loads((outdir / "t3_generic_grad50_scan_int_umin_lam.json").read_text())
+    u = np.array(d["values"], float)
+    runs = d["baseline"]
+    cfg = replace(SimConfig(**REALISTIC), rm_sigma=0.0, rm_grad_deg=50.0)
+    fig, ax = plt.subplots(figsize=(8, 5))
+    fig.subplots_adjust(left=0.1, right=0.95, top=0.78, bottom=0.12)
+    g = np.geomspace(u.min(), u.max(), 300)
+    pred = [predicted_gradient_int_pi(replace(cfg, int_umin_lam=v), 50.0) for v in g]
+    ax.plot(g, pred, color=INK2, lw=1)
+    ax.annotate("pure-gradient prediction:\nfraction of channels whose\nfringe |∇RM|λ²/π clears the cut",
+                (g[215], pred[215]), xytext=(60, 70), textcoords="offset points", fontsize=8.5, color=INK2,
+                arrowprops=dict(arrowstyle="-", color=INK2, lw=0.6))  # fmt: skip
+    y = [r["int"]["pi_mean"] for r in runs]
+    ax.plot(u, y, "-o", color=C1, lw=2, ms=6, mec="white", mew=1.5)
+    ax.annotate("interferometer", (u[2], y[2]), xytext=(0, 8), textcoords="offset points", fontsize=9.5, color=INK)
+    sd = runs[0]["sd"]["pi_mean"]
+    ax.axhline(sd, color=C2, lw=2)
+    ax.annotate(f"64 m single dish ({sd:.2f})", (u[0], sd), xytext=(0, 6), textcoords="offset points", fontsize=9.5,
+                color=INK)  # fmt: skip
+    ax.set(xscale="log", xlabel=r"interferometer inner cut $u_{\rm min}$ [λ]", ylabel="mean peak PI (true = 1)",
+           ylim=(0, 1.55), xlim=(8, 900))  # fmt: skip
+    ax.set_yticks([0, 0.2, 0.4, 0.6, 0.8, 1.0])
+    _arrays_on_axis(ax)
+    _style(ax)
+    _title(fig, "A strong RM gradient is kept by the interferometer, lost by the single dish",
+           "50 rad m⁻² deg⁻¹ gradient on the default sky, POSSUM band 1. Its Q/U fringes sit at 69–128 λ:\n"
+           "an inner cut below that keeps them; a 64 m dish beam-depolarises them. Above ~110 λ the screen's own\n"
+           "small-scale structure keeps some PI.")  # fmt: skip
+    fig.savefig(path, dpi=130, facecolor="white")
+    plt.close(fig)
+
+
+def t3_figures(outdir: Path) -> None:
+    """The five test-3 headline figures (needs the runs and scan_ucut JSON in outdir)."""
+    fig_what_int_measures(outdir / "t3_fig1_what_int_measures.png")
+    fig_errors_at_pi_nulls(outdir / "t3_fig2_errors_at_pi_nulls.png")
+    fig_inner_cut(outdir, outdir / "t3_fig3_inner_cut.png")
+    fig_arrays(outdir, outdir / "t3_fig4_arrays.png")
+    fig_gradient(outdir, outdir / "t3_fig5_gradient.png")
+
+
 def plot_transfer(cfgs: dict[str, SimConfig], path: Path) -> None:
     """uv transfer functions of each response model at the band edges, both cut modes."""
     u = np.linspace(0, 700, 1401)
@@ -1009,7 +1286,8 @@ def suite(name: str, base: SimConfig, outdir: Path, part: str = "all") -> None:
           "t2"    - realistic responses + SD/INT combination (feather and joint)
           "t3"    - interferometers: generic cut in λ, ASKAP and MeerKAT on common and native bands
     part: "all", "runs", "scan_grad", "scan_sigma" (t2 scans take a ":feather"/":joint" suffix);
-          t3 has "runs" and "scan_ucut" (":weak" / ":grad" suffixes pick one sky)
+          t3 has "runs", "scan_ucut" (":weak" / ":grad" suffixes pick one sky) and "figures"
+          (the five headline figures, from the runs/scan JSON; the per-run and scan plots are diagnostics)
     """
     real = replace(base, **REALISTIC)
     global ERR_LIM
@@ -1036,6 +1314,8 @@ def suite(name: str, base: SimConfig, outdir: Path, part: str = "all") -> None:
                 if which and which not in prefix.removeprefix("t3_generic"):
                     continue
                 scan(c, "int_umin_lam", UCUT_VALUES, outdir, UCUT_LABEL, prefix=prefix)
+        if part in ("all", "figures"):
+            t3_figures(outdir)
         return
     if name == "base":
         runs = _examples(base, "base")

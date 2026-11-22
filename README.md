@@ -81,7 +81,10 @@ A generic interferometer (sharp inner cut fixed in wavelengths, u_min = 10–320
 ASKAP (shortest baseline 22 m, 12 m dishes) and MeerKAT (29 m, 13.5 m) arrays, on the common POSSUM band 1
 and on native bands (ASKAP POSSUM band 1+2; MeerKAT UHF 544–1088 and L-band 856–1712 MHz).
 Noiseless and ideally deconvolved, so only the coverage edges matter (uv density only matters once
-there is noise). Same default sky as above. `results/t3_*`.
+there is noise). Same default sky as above. Figures (one question each), in `results/`:
+`t3_fig1_what_int_measures` (maps), `t3_fig2_errors_at_pi_nulls`, `t3_fig3_inner_cut`, `t3_fig4_arrays`,
+`t3_fig5_gradient`. Metrics and scan JSON are in `results/t3_*.json`; the per-run and scan plots that
+`--suite t3` writes to `outputs/` are diagnostics.
 
 | INT, default sky | u_min across band [λ] | RM error rms (bright half of PI) | uv-matched | mean PI |
 |---|---|---|---|---|
