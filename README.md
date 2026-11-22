@@ -16,61 +16,35 @@ Then install Python requirements:
 pip install -r requirements.txt
 ```
 
-## uv-filtering simulation (`src/filter_possum/uvfilter_sim.py`)
+## Simulator (`src/filter_possum/simulator.py`)
 
-A general version of the notebook experiment, in physical units. A constant-p (= 1),
-Faraday-thin sky, RM = 30 rad m⁻² + Gaussian random field (P(k) ∝ k^−11/3) + optional
-mean-RM gradient, is observed over 800–1088 MHz (288 × 1 MHz) on a 5 × 5° SIN grid.
-Each channel's Q+iU is filtered in the uv plane by the instruments' responses at that
-channel's wavelength (baseline b = |u| λ), then RM-synthesised with rm-lite.
-
-| Instrument | Sharp model (`base`) | Realistic model (`t1`) |
-|---|---|---|
-| Single dish (Murriyang/Parkes, 64 m) | b ≤ 64 m | aperture autocorrelation, 12 dB edge taper (FWHM 1.157 λ/D) |
-| Interferometer (ASKAP-like) | b ≥ 30 m | 30 m edge smeared over ±12 m (antenna aperture) |
-| Combination (`t2`) | – | feather (CASA-style) or joint (least-squares/Wiener, noiseless limit of joint deconvolution) |
-
-`--cut-mode fixed` evaluates the responses at a common wavelength for every channel
-(single dish smoothed to common resolution; interferometer inner edge uv-range matched).
-
-### Running
+A small simulator of what a single dish and an interferometer recover of a diffuse, Faraday-thin
+polarised sky. The sky has polarised intensity 1 everywhere and an RM screen (mean + Kolmogorov
+fluctuations + optional gradient) on a 5° × 5° field. Each frequency channel's Q + iU is filtered by
+each instrument's uv response at that channel's wavelength, then RM synthesis (rm-lite) gives a
+peak RM and peak PI per pixel.
 
 ```bash
 uv sync
-uv run filter-possum-sim --suite base           # sharp cuts: examples + gradient/sigma scans
-uv run filter-possum-sim --suite t1             # test 1: realistic responses
-uv run filter-possum-sim --suite t2             # test 2: SD+INT combination
-uv run filter-possum-sim --suite t2 --part scan_grad:joint   # one part (runs | scan_grad | scan_sigma)
-uv run filter-possum-sim --rm-grad 30 --sd-model aperture --int-inner soft --combine feather  # one run
-uv run pytest                                    # physics checks (~10 s)
+uv run pytest            # physics checks (~5 s)
 ```
 
-Raw outputs go to `outputs/` (gitignored). `results/` is a snapshot of all metrics
-(JSON), scans, transfer functions and the headline figures. Difference maps share one
-linear colour scale, ±RMSF FWHM/2 by default (`--err-lim` to change).
+```python
+from filter_possum import simulator as fs
 
-### Main findings (base case: σ(δRM) = 10 rad m⁻², realistic responses unless stated)
+sky = fs.Sky(rm_mean=30, rm_sigma=10, rm_grad=0)          # rad m^-2; gradient in rad m^-2 per degree
+obs = fs.observe(sky, fs.BANDS["possum1"], single_dish=fs.PARKES, interferometer=fs.ASKAP, combine="joint")
+res = fs.rmsynth(obs.cubes["int"], obs.band)               # {"rm", "pi", "phi", "fwhm", ...}
+fs.plot_comparison(obs, res, "ASKAP")                      # true / recovered / difference, for RM and PI
+```
 
-| | RM error, rms [rad m⁻²] | mean PI (true = 1) |
-|---|---|---|
-| Single dish | 1.5 | 0.88 |
-| Interferometer | 8.1 (13.0 with sharp cuts) | 0.19 |
-| Interferometer, uv-range matched | 3.3 | 0.16 |
-| Feather | 0.77 | 0.92 |
-| Joint | 0.04 | 0.99 |
+| Building block | Options |
+|---|---|
+| `Sky` | `rm_mean`, `rm_sigma`, `rm_slope`, `rm_grad`, `p0`, `npix`, `fov_deg`, `seed` |
+| `Band`, `BANDS` | `possum1` (800–1088 MHz), `possum12` (+ 1296–1440 MHz), `uhf` (544–1088), `lband` (856–1712); or your own `(f_min, f_max, width)` segments |
+| `SingleDish`, `PARKES` | `diameter_m`, `model` (`"aperture"` with `edge_taper_db`, or `"sharp"`) |
+| `Interferometer`, `ASKAP`, `MEERKAT` | `shortest_baseline_m`, `dish_diameter_m`, `edge` (`"soft"`/`"sharp"`), `umin_lambda` (fixed cut in wavelengths), `restore_arcmin` |
+| `observe` | `combine` (`"feather"`, `"joint"`), `uv_match` (same angular scales in every channel), `joint_eps` |
 
-* **An interferometer measures polarisation-angle gradients, not polarised intensity.** In
-  the weak-screen limit its PI is 2λ₀²|δRM_high-pass| (correlation 0.999 with the simulation),
-  yet its RM still follows the large-scale RM, carried by the small-scale structure.
-* **Frequency-dependent uv coverage creates spurious Faraday structure.** Matching the uv
-  range across the band cuts the interferometer's RM error by 2–9×.
-* **An RM gradient puts Q/U fringes at baseline b = |∇RM| λ³ / π.** The single dish passes
-  them with weight T_SD(b), which is exactly its PI for a pure gradient (tested to 10⁻³);
-  the interferometer sees them only once b ≳ 30 m (31–79 rad m⁻² deg⁻¹ splits the band).
-  With 64 m the two instruments cross near 40 rad m⁻² deg⁻¹, each recovering < 60%.
-* **Feathering beats either instrument but loses 8–25% of PI**, because it does not
-  deconvolve the single-dish response (combined transfer dips to 0.59 at b ≈ 25 m).
-  **Joint combination recovers RM to ≤ 0.07 rad m⁻² and PI ≥ 0.98** at all gradients and σ
-  tested, so the uv coverages overlap sufficiently; this is a noiseless upper bound.
-
-Not yet included: noise, Stokes I, Faraday-thick emission, structure in p, multiple realisations.
+`examples/simulator.ipynb` walks through it. The model is noiseless and the interferometer is
+perfectly deconvolved, so only its shortest baseline and dish size matter (not its uv density).

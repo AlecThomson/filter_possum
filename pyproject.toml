@@ -1,7 +1,7 @@
 [project]
 name = "filter-possum"
 version = "0.1.0"
-description = "What single dishes vs interferometers recover of a diffuse Faraday screen (POSSUM-like band)"
+description = "Simulate what single dishes and interferometers recover of a diffuse Faraday screen"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -11,9 +11,6 @@ dependencies = [
     "dask>=2024.1",
     "rm-lite>=2026.11.0",
 ]
-
-[project.scripts]
-filter-possum-sim = "filter_possum.uvfilter_sim:main"
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.6"]
