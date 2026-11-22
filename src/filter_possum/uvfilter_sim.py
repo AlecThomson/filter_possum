@@ -225,6 +225,19 @@ def predicted_gradient_depol(cfg: SimConfig, grad_deg: float) -> float:
     return float(np.mean(sd_transfer(cfg, b_fringe)))
 
 
+def predicted_gradient_int_pi(cfg: SimConfig, grad_deg: float) -> float:
+    """Band-mean interferometer PI for a pure linear RM gradient (cf. predicted_gradient_depol).
+
+    The gradient's Q/U fringe sits at u = G lambda^2 / pi; the INT passes it with weight T_int(u), real
+    and positive, so the FDF peak is the band mean of T_int at the fringe. For a sharp cut in λ this is
+    the fraction of channels whose fringe clears u_min. Exact for an infinite gradient; the simulated
+    ramp is ~7 deg long, so each fringe is ~8 λ wide and a *sharp* cut is only matched to within that
+    (the smooth single-dish response is not sensitive to it, hence its exact agreement).
+    """
+    u_fringe = (grad_deg / DEG) * cfg.lams**2 / np.pi
+    return float(np.mean([uv_masks(cfg, np.array([u]), lam)[1][0] for u, lam in zip(u_fringe, cfg.lams, strict=True)]))
+
+
 _AC_CACHE: dict[float, tuple[np.ndarray, np.ndarray]] = {}
 
 
@@ -414,6 +427,21 @@ def rm_transfer(rec: np.ndarray, true: np.ndarray, dl: float, nbins: int = 20) -
     filled = [i for i in range(1, nbins + 1) if np.any(idx == i)]
     t = np.array([cross[idx == i].sum() / pt[idx == i].sum() for i in filled])
     return np.sqrt(edges[1:] * edges[:-1])[np.array(filled) - 1], t
+
+
+def transfer_u50(u: np.ndarray, t: np.ndarray) -> float:
+    """uv distance where a transfer function, recovered (>= 0.5) at large scales, first falls below 0.5.
+
+    Log-interpolated between bins; NaN if it never reaches 0.5, inf if it never falls below.
+    """
+    above = t >= 0.5
+    if not above[0]:
+        return float("nan")
+    i = np.argmin(above)  # first False
+    if above[i]:
+        return float("inf")
+    x0, x1 = np.log(u[i - 1]), np.log(u[i])
+    return float(np.exp(x0 + (t[i - 1] - 0.5) / (t[i - 1] - t[i]) * (x1 - x0)))
 
 
 def apply_transfer(img_big: np.ndarray, cfg: SimConfig, transfer: np.ndarray) -> np.ndarray:
@@ -678,11 +706,13 @@ def run(cfg: SimConfig, outdir: Path | None = None, tag: str = "run") -> dict:
     }
     if cfg.scale_metrics:
         for k in res:
-            u, t = rm_transfer(np.nan_to_num(res[k]["rm"], nan=np.nanmean(res[k]["rm"])), rm_true, cfg.dl)
+            rm_k = np.nan_to_num(res[k]["rm"], nan=np.nanmean(res[k]["rm"]))
+            u, t = rm_transfer(rm_k, rm_true, cfg.dl)
             m[k]["rm_transfer"] = t.tolist()
-            # the scale where the array stops recovering RM: first bin (from large scales) with T >= 0.5
-            ok = np.nonzero(t >= 0.5)[0]
-            m[k]["rm_transfer_u50"] = float(u[ok[0]]) if ok.size else float("nan")
+            m[k]["rm_transfer_u50"] = transfer_u50(u, t)
+            # an observer masks on PI (S/N): RM error over the brighter half of this product's PI map
+            bright = res[k]["pi"] >= np.nanmedian(res[k]["pi"])
+            m[k]["rm_rms_err_bright_half"] = float(np.sqrt(np.nanmean((res[k]["rm"] - rm_true)[bright] ** 2)))
         m["input"]["rm_transfer_u"] = u.tolist()
         m["input"]["freq_range_mhz"] = [cfg.freqs.min() / 1e6, cfg.freqs.max() / 1e6]
     if outdir is not None:
@@ -811,7 +841,8 @@ def plot_ucut_scan(out: dict, cfg: SimConfig, outdir: Path, prefix: str) -> None
     fig, axs = plt.subplots(1, 4, figsize=(20, 4.4), constrained_layout=True)
     a = axs[0]
     a.plot(values, [r["int"]["rm_rms_err"] for r in runs], "o-", color=COLOURS["int"], label="INT rms error")
-    a.plot(values, [abs(r["int"]["rm_bias"]) for r in runs], "s--", color=COLOURS["int"], label="INT |bias|")
+    a.plot(values, [r["int"]["rm_rms_err_bright_half"] for r in runs], "s--", color=COLOURS["int"],
+           label="INT rms error, brighter half of PI")  # fmt: skip
     a.axhline(runs[0]["sd"]["rm_rms_err"], color=COLOURS["sd"], lw=1, label="single dish rms error")
     a.axhline(runs[0]["input"]["rm_std"], color="k", ls="--", lw=1, label="input RM std")
     a.axhline(runs[0]["input"]["fwhm_rmsf"] / 2, color="0.6", lw=0.8, label="RMSF FWHM / 2")
@@ -819,6 +850,10 @@ def plot_ucut_scan(out: dict, cfg: SimConfig, outdir: Path, prefix: str) -> None
     axs[1].plot(values, [r["int"]["rm_corr_with_true"] for r in runs], "o-", color=COLOURS["int"], label="RM corr")
     axs[1].plot(values, [r["int"]["pi_mean"] for r in runs], "s-", color="tab:purple", label="mean PI (true 1)")
     axs[1].plot(values, [r["int"]["qu_power_retained"] for r in runs], "^:", color="tab:gray", label="Q/U power kept")
+    if cfg.rm_grad_deg != 0:
+        g = np.geomspace(values.min(), values.max(), 200)
+        axs[1].plot(g, [predicted_gradient_int_pi(replace(cfg, rm_sigma=0.0, int_umin_lam=v), cfg.rm_grad_deg)
+                        for v in g], "k-", lw=0.8, label="pure-gradient fringe prediction")  # fmt: skip
     axs[1].set(title="INT: RM correlation, PI and Q/U power", ylim=(0, 1.05))
     for ax in axs[:2]:
         for lab, lo, hi, col in _array_ucut_ranges():
@@ -842,10 +877,10 @@ def plot_ucut_scan(out: dict, cfg: SimConfig, outdir: Path, prefix: str) -> None
     axs[3].plot(values, [r["int"]["rm_transfer_u50"] for r in runs], "o-", color=COLOURS["int"])
     axs[3].plot(values, values, "k--", lw=1, label="u$_{50}$ = u$_{min}$")
     axs[3].set(xlabel="INT inner cut u$_{min}$ [λ]", ylabel="u$_{50}$ [λ]", xscale="log", yscale="log",
-               title="Largest RM scale recovered (T ≥ 0.5)")  # fmt: skip
+               title="RM recovered down to scale 1/u$_{50}$ (transfer falls to 0.5)")  # fmt: skip
     axs[3].legend(fontsize=7)
     fig.suptitle(
-        f"{prefix}generic interferometer (sharp cut in λ, same every channel), "
+        f"{prefix.rstrip('_')}: generic interferometer (sharp cut in λ, same every channel), "
         f"{cfg.freqs.min() / 1e6:.0f}–{cfg.freqs.max() / 1e6:.0f} MHz, σ(δRM)={cfg.rm_sigma:g}, "
         f"∇RM={cfg.rm_grad_deg:g}, SD={cfg.sd_model} {cfg.sd_bmax_m:g} m",
         fontsize=10,

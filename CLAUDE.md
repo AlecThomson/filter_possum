@@ -32,6 +32,7 @@ uv run ruff check src tests && uv run ruff format --check src tests
 uv run filter-possum-sim --suite base|t1|t2            # whole suite
 uv run filter-possum-sim --suite t2 --part runs        # parts: runs | scan_grad | scan_sigma
 uv run filter-possum-sim --suite t2 --part scan_grad:joint
+uv run filter-possum-sim --suite t3 --part runs|scan_ucut   # interferometers; scan_ucut:weak / :grad for one sky
 uv run filter-possum-sim --rm-grad 30 --sd-model aperture --int-inner soft --combine feather   # one run
 ```
 
@@ -79,6 +80,11 @@ Rough runtimes (1 CPU): example runs ~1–2 min per suite; each scan ~1.5–3.5 
   b = |∇RM| λ³ / π; the INT sees it once b ≳ 30 m. The Gaussian-beam formula is only
   approximate (~10% low once p < 0.5) — don't reintroduce it as "exact".
 - Dish beam FWHM: 1.03 λ/D uniform, 1.157 λ/D for 12 dB edge taper.
+- Generic λ cut at b_min/λ_min is *exactly* uv-range matching; the weak-screen PI law holds for any λ cut.
+- Pure gradient, sharp λ cut: INT PI = fraction of channels whose fringe |∇RM| λ²/π clears u_min, to
+  within the fringe width 1/(ramp length) ≈ 8 λ (finite ramp; the smooth SD response doesn't see it).
+- INT RM transfer ≈ 1 at u < u_min and falls to 0.5 at u ≈ u_min; INT RM errors sit at its PI nulls
+  (brighter half of PI has < half the rms error).
 
 ## Headline findings so far
 
@@ -86,14 +92,19 @@ See README "Main findings". In short: the INT measures angle gradients, not PI; 
 dependent uv coverage creates spurious Faraday structure (uv matching cuts INT RM error 2–9×);
 a 64 m dish beam-depolarises strongly for |∇RM| ≳ 30 rad m⁻² deg⁻¹; feathering loses 8–25% PI
 (undeconvolved SD response, dip to 0.59 at b ≈ 25 m); joint combination recovers RM ≤0.07 rad m⁻²
-and PI ≥0.98 (noiseless upper bound).
+and PI ≥0.98 (noiseless upper bound). Test 3 (interferometers): an INT's RM map is the RM on scales
+> 1/u_min and its PI is |RM| on smaller scales; errors sit at PI nulls; the band matters more than
+ASKAP vs MeerKAT; uv matching helps 1.5–3.5× (most at L-band).
 
 ## Roadmap (agreed order; do one at a time, report results, then continue)
 
-1. **Test 3 — Faraday-thick emission.** e.g. a Burn slab (uniform emission + rotation) and/or
-   mixed screen + emitting layer, so frequency dependence is intrinsic. Compare SD / INT /
-   feather / joint against the true Faraday spectrum (not just a peak RM); consider RM-CLEAN
-   (rm-lite `tools_3d.rmclean`) and moments of the FDF.
+1. **Test 3 — interferometers (done).** Generic λ cut, parametric ASKAP / MeerKAT, common and
+   native bands, scale-resolved RM transfer (`scale_metrics`). Presets: `ARRAYS`, `BANDS`.
+   Natural follow-ups: real uv density + weighting once noise exists; SD+INT combination per array.
+   (Faraday-thick emission was prototyped and parked at the user's request: the band can't resolve
+   slabs narrower than the RMSF, and noiseless RM-CLEAN moments don't recover their widths. Thickness
+   inferred from in-band depolarisation showed SD beam depolarisation mimicking thickness and the INT's
+   λ² repolarisation hiding it.)
 2. **Test 4 — structure in intrinsic p and χ0** (so PI structure is real, not purely Faraday).
 3. **Test 5 — noise and realisations.** Add thermal noise per instrument (sensitivity-weighted),
    re-derive `joint_eps` from S/N, and run multiple seeds for error bars on all scan metrics.

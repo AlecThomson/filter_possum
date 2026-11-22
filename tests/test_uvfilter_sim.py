@@ -132,3 +132,31 @@ def test_band_presets():
     assert f.size == 288 + 144 and not np.any((f > 1088e6) & (f < 1296e6))
     c = sim.array_config(REAL, "askap", "possum1")
     assert sim.int_inner_transfer(c, np.array([22.0]))[0] == pytest.approx(0.5, abs=0.01)
+
+
+@pytest.mark.parametrize("umin", [60.0, 80.0, 100.0, 120.0])  # in-band fringes span 69-128 λ at 50 rad m^-2 deg^-1
+def test_generic_cut_gradient_pi_is_fraction_of_channels_passing(umin):
+    """Pure gradient: INT PI ~= fraction of channels whose fringe u = |grad RM| lambda^2 / pi clears u_min.
+
+    The ramp is finite (grad_ramp_frac x padded box ~ 7 deg), so each fringe is spread over
+    w ~ 1/ramp ~ 8 λ; a sharp cut resolves that, so the PI is bracketed by the prediction at u_min -/+ w.
+    """
+    cfg = replace(sim.SimConfig(npix=64), rm_sigma=0.0, rm_grad_deg=50.0, int_umin_lam=umin)
+    w = 1.0 / (cfg.grad_ramp_frac * cfg.nbig * cfg.dl)
+
+    def frac(u):
+        return np.mean(50.0 / sim.DEG * cfg.lams**2 / np.pi >= u)
+
+    assert sim.predicted_gradient_int_pi(cfg, 50.0) == pytest.approx(frac(umin))
+    pi = sim.rm_synthesis(sim.observe(cfg, sim.make_rm_sky(cfg))["int"], cfg)["pi"].mean()
+    assert frac(umin + w) - 5e-3 <= pi <= frac(umin - w) + 5e-3
+
+
+def test_interferometer_rm_errors_sit_at_pi_nulls():
+    """Weak screen: INT RM is well defined where its PI (~ 2 lambda^2 |delta_phi_HP|) is bright;
+    the error comes from the nulls, so the brighter half has < half the overall rms error. RM
+    structure is recovered (via the phase) at scales larger than the cut: transfer falls to 0.5 at u_min."""
+    m = sim.run(replace(sim.SimConfig(npix=64), rm_sigma=2.0, int_umin_lam=80.0, scale_metrics=True))["int"]
+    assert m["rm_rms_err_bright_half"] < 0.5 * m["rm_rms_err"]
+    assert m["rm_transfer_u50"] == pytest.approx(80.0, rel=0.25)
+    assert np.mean(m["rm_transfer"][:4]) > 0.6

@@ -41,6 +41,8 @@ uv run filter-possum-sim --suite base           # sharp cuts: examples + gradien
 uv run filter-possum-sim --suite t1             # test 1: realistic responses
 uv run filter-possum-sim --suite t2             # test 2: SD+INT combination
 uv run filter-possum-sim --suite t2 --part scan_grad:joint   # one part (runs | scan_grad | scan_sigma)
+uv run filter-possum-sim --suite t3             # test 3: interferometers (generic λ cut, ASKAP, MeerKAT)
+uv run filter-possum-sim --array meerkat --band uhf --sd-model aperture   # one array/band preset
 uv run filter-possum-sim --rm-grad 30 --sd-model aperture --int-inner soft --combine feather  # one run
 uv run pytest                                    # physics checks (~10 s)
 ```
@@ -72,5 +74,45 @@ linear colour scale, ±RMSF FWHM/2 by default (`--err-lim` to change).
   deconvolve the single-dish response (combined transfer dips to 0.59 at b ≈ 25 m).
   **Joint combination recovers RM to ≤ 0.07 rad m⁻² and PI ≥ 0.98** at all gradients and σ
   tested, so the uv coverages overlap sufficiently; this is a noiseless upper bound.
+
+### Test 3: what different interferometers tell us
+
+A generic interferometer (sharp inner cut fixed in wavelengths, u_min = 10–320 λ) and parametric
+ASKAP (shortest baseline 22 m, 12 m dishes) and MeerKAT (29 m, 13.5 m) arrays, on the common POSSUM band 1
+and on native bands (ASKAP POSSUM band 1+2; MeerKAT UHF 544–1088 and L-band 856–1712 MHz).
+Noiseless and ideally deconvolved, so only the coverage edges matter (uv density only matters once
+there is noise). Same default sky as above. `results/t3_*`.
+
+| INT, default sky | u_min across band [λ] | RM error rms (bright half of PI) | uv-matched | mean PI |
+|---|---|---|---|---|
+| ASKAP, POSSUM band 1 | 59–80 | 7.3 (3.7) | 3.6 | 0.24 |
+| MeerKAT, POSSUM band 1 | 77–105 | 7.7 (3.5) | 3.2 | 0.19 |
+| ASKAP, POSSUM band 1+2 | 59–106 | 7.0 (3.7) | 2.8 | 0.19 |
+| MeerKAT, UHF | 53–105 | 3.8 (2.9) | 2.5 | 0.36 |
+| MeerKAT, L-band | 83–165 | 8.5 (3.9) | 2.4 | 0.09 |
+
+* **An interferometer's RM map is the RM on scales larger than its inner cut; its PI map is the RM
+  on smaller scales.** The large-scale RM rides on the phase of the small-scale structure, so the
+  scale-resolved RM transfer function is ≈ 0.8–1 for u < u_min and falls to 0.5 at u ≈ u_min
+  (0.6–1.4 u_min in a single realisation). Meanwhile PI = 2λ²|δRM(u > u_min)| (weak-screen law, now
+  tested for any λ cut). Small-scale RM appears in PI, not in RM.
+* **The interferometer's RM errors sit at its PI nulls** (where the high-passed RM changes sign).
+  Keeping the brighter half of the PI map halves the rms error (e.g. 7.3 → 3.7 rad m⁻² for ASKAP).
+  Any S/N mask will do this in practice.
+* **A larger inner cut gives a *better* RM but less PI**: generic RM error 8.2 → 4.3 rad m⁻² (bright
+  half 5.3 → 1.6) from 20 to 320 λ, while PI falls ∝ u_min^−0.95 (expected −(|β|−2)/2 = −0.83 for
+  β = −11/3). Without noise this favours large cuts; with noise (test 5) the falling PI will win somewhere.
+* **The band matters more than the array.** On the same band, ASKAP and MeerKAT agree to ~10% in RM
+  error; MeerKAT's longer shortest baseline costs ~20% of PI. Lower frequencies give more PI
+  (angle gradients ∝ λ²; UHF 0.36, L-band 0.09) and a much better RMSF (UHF FWHM 17 rad m⁻²).
+  The wider the fractional band, the more a physical cut moves across it (2× at L-band) and the more
+  spurious Faraday structure it creates. uv-range matching fixes this, cutting INT RM error 1.5–3.5×;
+  L-band goes from worst (8.5) to best (2.4).
+* **RM gradients:** the INT PI is the band mean of T_int at the fringe u = |∇RM| λ²/π. At 50 rad m⁻² deg⁻¹
+  the fringe spans 69–128 λ over POSSUM band 1, so a cut ≲ 60 λ (ASKAP) keeps PI ≈ 1 where a
+  64 m dish has depolarised to 0.35. Above ~110 λ the interferometer loses it.
+
+Caveats: noiseless; one realisation (u₅₀ scatters by tens of per cent); no primary beam or mosaicking;
+the 2.3′ grid reaches only u ≈ 730 λ, so outer edges and resolution are not modelled.
 
 Not yet included: noise, Stokes I, Faraday-thick emission, structure in p, multiple realisations.
